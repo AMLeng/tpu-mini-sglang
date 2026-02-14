@@ -1,0 +1,53 @@
+[project]
+name = "tpu-mini-sglang"
+description = "Miniature version of SGLang written in JAX"
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["version"]
+
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.19",
+  "ruff>=0.11.0",
+  "codespell>=2.4.0"
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E", # pycodestyle errors
+  "F", # pyflakes
+  "UP", # pyupgrade
+  "B", # flake8-bugbear
+  "SIM", # flake8-simplify
+  "I", # isort
+  "G", # flake8-logging-format
+  "C4", # flake8-comprehensions
+]
+ignore = [
+  "B007", # loop control variable not used within loop body; common in jax code
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+show_error_codes = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = [
+]
+ignore_missing_imports = true
