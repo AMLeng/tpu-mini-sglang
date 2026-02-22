@@ -1,0 +1,165 @@
+"""Pydantic models and conversion functions for OpenAI protocol"""
+
+import time
+from collections.abc import AsyncIterator
+from typing import Literal
+
+from fastapi import Request
+from pydantic import BaseModel, Field
+
+from tpu_mini_sglang.managers.io_struct import GenerateRequest
+from tpu_mini_sglang.sampling.sampling_params import SamplingParams
+
+############## Pydantic Models ##############
+
+
+class ChatCompletionDeveloperMessageParam(BaseModel):
+    content: str
+    role: Literal["developer"]
+    name: str | None = None
+
+
+class ChatCompletionUserMessageParam(BaseModel):
+    content: str
+    role: Literal["user"]
+    name: str | None = None
+
+
+ChatCompletionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletionUserMessageParam
+# We only support a minimal subset of possible message param types
+# See the OpenAI schema for the full list
+# https://developers.openai.com/api/reference/resources/chat#(resource)%20chat.completions%20%3E%20(model)%20chat_completion_message_param%20%3E%20(schema)
+
+
+class ChatCompletionRequest(BaseModel):
+    # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+    # We only include fields that are actually used downstream
+    messages: list[ChatCompletionMessageParam]
+    model: str
+    frequency_penalty: float = 0.0
+    logit_bias: dict[str, float] | None = None
+    max_completion_tokens: int | None = None
+    presence_penalty: float = 0.0
+    temperature: float = 0.7
+    top_p: float = 1.0
+
+
+class ChoiceDelta(BaseModel):
+    content: str | None = None
+    refusal: str | None = None
+    role: Literal["assistant"] | None = None
+
+
+class ChatCompletionResponseStreamChoice(BaseModel):
+    delta: ChoiceDelta
+    finish_reason: Literal["stop", "length", "abort"] | None
+    index: int
+    # logprobs: None
+
+
+class ChatCompletionChunk(BaseModel):
+    # https://github.com/openai/openai-python/blob/main/src/openai/types/chat/chat_completion_chunk.py
+    id: str
+    choices: list[ChatCompletionResponseStreamChoice]
+    created: int
+    model: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    # service_tier: None
+    # system_fingerprint: None
+    # usage: None
+
+
+class ModelCard(BaseModel):
+    """Model cards."""
+
+    id: str
+    object: str = "model"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str = "tpu-mini-sglang"
+    root: str | None
+    max_model_len: int | None = None
+
+
+class ModelList(BaseModel):
+    """List of model cards."""
+
+    object: str = "list"
+    data: list[ModelCard] = Field(default_factory=list)
+
+
+############## Conversion Methods ##############
+
+
+def convert_chat_completion_to_internal_request(
+    req: ChatCompletionRequest, raw_request: Request
+) -> GenerateRequest:
+    # The raw_request is necessary to access the tokenizer_manager from app.state
+    sampling_params = SamplingParams(
+        max_new_tokens=req.max_completion_tokens,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        frequency_penalty=req.frequency_penalty,
+        presence_penalty=req.presence_penalty,
+        logit_bias=req.logit_bias if req.logit_bias else {},
+    )
+
+    tokenized_templated_input = (
+        raw_request.app.state.tokenizer_manager.tokenizer.apply_chat_template(
+            req.messages, tokenize=True, add_generation_prompt=True
+        )
+    )
+    return GenerateRequest(input_ids=tokenized_templated_input, sampling_params=sampling_params)
+
+
+async def oai_format_response_stream(
+    response_stream: AsyncIterator[dict], model_name: str
+) -> AsyncIterator[str]:
+    is_first = True
+    finish_reason_type = None
+    stream_buffer = ""
+    async for content in response_stream:
+        # We do not support parallel sampling; the index is always 0
+        index = 0
+        if content["meta_info"]["finish_reason"] is not None:
+            finish_reason_type = content["meta_info"]["finish_reason"]
+
+        rid = content["meta_info"]["id"]
+
+        # Emit the initial chunk with the role
+        if is_first:
+            is_first = False
+            first_choice = ChatCompletionResponseStreamChoice(
+                delta=ChoiceDelta(role="assistant", content=""),
+                finish_reason=None,
+                index=index,
+            )
+            first_chunk = ChatCompletionChunk(
+                id=rid, created=int(time.time()), choices=[first_choice], model=model_name
+            )
+            yield f"data: {first_chunk.model_dump_json()}\n\n"
+
+        delta = content["text"][len(stream_buffer) :]
+        stream_buffer = content["text"]
+
+        if delta:
+            choice = ChatCompletionResponseStreamChoice(
+                delta=ChoiceDelta(content=delta), finish_reason=None, index=index
+            )
+            chunk = ChatCompletionChunk(
+                id=rid, created=int(time.time()), choices=[choice], model=model_name
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+    # Emit final chunk, using the id from the last round of the loop
+    finish_reason_chunk = ChatCompletionChunk(
+        id=rid,
+        created=int(time.time()),
+        choices=[
+            ChatCompletionResponseStreamChoice(
+                delta=ChoiceDelta(), finish_reason=finish_reason_type, index=index
+            )
+        ],
+        model=model_name,
+    )
+    yield f"data: {finish_reason_chunk.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"

@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dynamic = ["version"]
 
 dependencies = [
+  "fastapi>=0.110",
+  "orjson>=3.11"
 ]
 
 [project.optional-dependencies]
