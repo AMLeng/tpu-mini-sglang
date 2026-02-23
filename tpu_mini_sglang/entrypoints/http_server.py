@@ -1,6 +1,12 @@
+import logging
+import threading
+import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import orjson
+import requests
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 
@@ -12,8 +18,26 @@ from tpu_mini_sglang.entrypoints.openai_protocol import (
     oai_format_response_stream,
 )
 from tpu_mini_sglang.managers.io_struct import GenerateRequest
+from tpu_mini_sglang.server_args import ServerArgs
+from tpu_mini_sglang.utils import get_exception_traceback, kill_process_tree
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(fast_api_app: FastAPI):
+
+    warmup_thread = threading.Thread(
+        target=_execute_server_warmup, args=(fast_api_app.state.server_args,)
+    )
+    warmup_thread.start()
+    try:
+        yield
+    finally:
+        warmup_thread.join()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
@@ -59,3 +83,70 @@ async def openai_v1_models():
         max_model_len=app.state.tokenizer_manager.model_config.context_len,
     )
     return ModelList(data=[model_card])
+
+
+def launch_server(server_args: ServerArgs):
+    """
+    Launches the full server, with a HTTP server and an engine.
+    The engine spawns/owns the tokenizer_manager, scheduler, and detokenizer_manager.
+    Following SGLang, the server, tokenizer_manager, and engine all run in the main process.
+    The scheduler and detokenizer_manager run as separate subprocesses.
+    """
+
+    # Save the server args so they can be accessed by the warmup
+    app.state.server_args = server_args
+
+    uvicorn.run(
+        app,
+        host=server_args.host,
+        port=server_args.port,
+        log_level=server_args.log_level,
+        timeout_keep_alive=5,
+        loop="uvloop",
+    )
+
+
+def _execute_server_warmup(server_args: ServerArgs):
+    if server_args.skip_server_warmup:
+        return True
+
+    url = server_args.url
+
+    # Wait until the server is launched
+    success = False
+    last_traceback = ""
+    for _ in range(120):
+        time.sleep(1)
+        try:
+            res = requests.get(url + "/health", timeout=5)
+            res.raise_for_status()
+            success = True
+            break
+        except requests.exceptions.RequestException:
+            last_traceback = get_exception_traceback()
+            pass
+    if not success:
+        logger.error("Initialization failed. Warmup error: %s", last_traceback)
+        kill_process_tree()
+        return success
+    request_name = "/generate"
+    max_new_tokens = 8
+    warmup_timeout = 600
+
+    # Unlike the original SGLang, our /generate input only takes in a single string, not an array
+    # Hence json_data["text"] is always just a string
+    json_data = {
+        "sampling_params": {"temperature": 0, "max_new_tokens": max_new_tokens},
+        "text": "The capital city of France is",
+    }
+
+    try:
+        res = requests.post(url + request_name, json=json_data, timeout=warmup_timeout)
+        res.raise_for_status()
+    except Exception:
+        last_traceback = get_exception_traceback()
+        logger.error("Initialization failed. Warmup error: %s", last_traceback)
+        kill_process_tree()
+        return False
+
+    return success
