@@ -11,6 +11,7 @@ dependencies = [
   "psutil",
   "requests",
   "simple-parsing>=0.1.8",
+  "transformers>=4.57.1,<5",
   "uvicorn",
   "uvloop",
 ]

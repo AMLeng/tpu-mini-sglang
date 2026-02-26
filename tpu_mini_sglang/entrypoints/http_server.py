@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 
+from tpu_mini_sglang.entrypoints.engine import launch_subprocesses
 from tpu_mini_sglang.entrypoints.openai_protocol import (
     ChatCompletionRequest,
     ModelCard,
@@ -78,8 +79,8 @@ async def openai_v1_chat_completions(req: ChatCompletionRequest, raw_request: Re
 async def openai_v1_models():
     """List available models. OpenAI-compatible endpoint."""
     model_card = ModelCard(
-        id=app.state.tokenizer_manager.served_model_name,
-        root=app.state.tokenizer_manager.served_model_name,
+        id=app.state.tokenizer_manager.model_path,
+        root=app.state.tokenizer_manager.model_path,
         max_model_len=app.state.tokenizer_manager.model_config.context_len,
     )
     return ModelList(data=[model_card])
@@ -87,14 +88,19 @@ async def openai_v1_models():
 
 def launch_server(server_args: ServerArgs):
     """
-    Launches the full server, with a HTTP server and an engine.
-    The engine spawns/owns the tokenizer_manager, scheduler, and detokenizer_manager.
-    Following SGLang, the server, tokenizer_manager, and engine all run in the main process.
+    Launches the HTTP server and engine:
+    The engine consists of the tokenizer_manager, scheduler, and detokenizer_manager.
+    Following SGLang, when using a HTTP server, there is no actual Engine class.
+    Following SGLang, the server and tokenizer_manager run in the main process.
     The scheduler and detokenizer_manager run as separate subprocesses.
     """
 
     # Save the server args so they can be accessed by the warmup
     app.state.server_args = server_args
+
+    tokenizer_manager = launch_subprocesses(server_args)
+
+    app.state.tokenizer_manager = tokenizer_manager
 
     uvicorn.run(
         app,
