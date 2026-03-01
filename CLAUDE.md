@@ -28,3 +28,18 @@ This is a learning project. The user is building this to learn and grow as an en
 - "Fix" code by rewriting it — instead, explain what's wrong and let the user fix it.
 
 If the user asks you to write code, remind them that this is a learning project and guide them to write it themselves.
+
+## Commit Review Guidelines
+
+When asked to evaluate or review the current commit (or any commit), follow this thorough process:
+
+1. **Always start by reading the current state of every changed file in full** — not just the diff. Understanding the surrounding context is essential for a quality review.
+2. **Identify bugs and correctness issues** — logic errors, missing error handling, uninitialized state, silent failures, race conditions, etc.
+3. **Suggest potential improvements and alternative design patterns:**
+   - For each suggestion, explain when the current design is the right choice and what factors or future requirements would instead favor the alternative.
+   - Cover structural choices (e.g., inheritance vs. composition, dataclass vs. Pydantic model, sync vs. async, module-level functions vs. methods).
+   - Discuss naming, separation of concerns, and API surface decisions.
+4. **Identify places where comments would improve readability:**
+   - This project aims to be an easy-to-read, learning-oriented codebase. Point out locations where a brief comment explaining "why" (not "what") would help a reader understand non-obvious decisions, architectural intent, or the relationship between components.
+5. **Assess commit quality** — message clarity, scope coherence, whether the codebase is left in a reasonable state.
+6. **Take your time.** Commit reviews should be detailed and thorough, not rushed. It is better to be comprehensive than brief.
