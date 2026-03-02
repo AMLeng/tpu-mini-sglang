@@ -9,6 +9,7 @@ dependencies = [
   "fastapi>=0.110",
   "orjson>=3.11",
   "psutil",
+  "pyzmq>=25.1.2",
   "requests",
   "simple-parsing>=0.1.8",
   "transformers>=4.57.1,<5",

@@ -1,4 +1,5 @@
 import dataclasses
+import tempfile
 from typing import Self
 
 import simple_parsing
@@ -30,3 +31,22 @@ class ServerArgs:
     def url(self):
         # Assumes we are using IPv4
         return f"http://{self.host}:{self.port}"
+
+
+@dataclasses.dataclass
+class PortArgs:
+    # With multiple hosts, we will have ports rather than ipc socket names
+    # ipc filename for detokenizer to send to tokenizer
+    tokenizer_ipc_name: str
+    # ipc filename for tokenizer to send to scheduler
+    scheduler_input_ipc_name: str
+    # ipc filename for scheduler to send to detokenizer
+    detokenizer_ipc_name: str
+
+    @staticmethod
+    def init_new():
+        return PortArgs(
+            tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+            scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+            detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+        )

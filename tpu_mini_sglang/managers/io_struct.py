@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 
+FinishReason = Literal["stop", "length", "abort"]
+
 
 class GenerateRequest(BaseModel):
     # Externally facing through the /generate endpoint
@@ -33,9 +35,24 @@ class TokenizedGenerateRequest:
     sampling_params: SamplingParams
 
 
+@dataclass
+class BatchStrOutput:
+    rids: list[str]
+    finished_reasons: list[FinishReason | None]
+    output_strs: list[str]
+    output_ids: list[list[int]]
+
+    # Token counts
+    prompt_tokens: list[int]
+    completion_tokens: list[int]
+    cached_tokens: list[int]
+
+
 class ResponseMetadataDict(TypedDict):
     id: str
-    finish_reason: Literal["stop", "length", "abort"] | None
+    finish_reason: FinishReason | None
+
+    # Token counts
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int

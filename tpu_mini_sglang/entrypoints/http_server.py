@@ -98,6 +98,10 @@ def launch_server(server_args: ServerArgs):
     # Save the server args so they can be accessed by the warmup
     app.state.server_args = server_args
 
+    # With just a HTTP server, we could construct these
+    # e.g. in the lifecycle hook. However SGLang has multiple
+    # entrypoints and thus constructs the subprocesses
+    # independently from launching the HTTP server
     tokenizer_manager = launch_subprocesses(server_args)
 
     app.state.tokenizer_manager = tokenizer_manager
