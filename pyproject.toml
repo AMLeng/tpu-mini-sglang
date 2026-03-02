@@ -12,6 +12,7 @@ dependencies = [
   "pyzmq>=25.1.2",
   "requests",
   "simple-parsing>=0.1.8",
+  "tokenizers>=0.21.1",
   "transformers>=4.57.1,<5",
   "uvicorn",
   "uvloop",

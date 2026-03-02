@@ -36,6 +36,18 @@ class TokenizedGenerateRequest:
 
 
 @dataclass
+class BatchTokenIDOutput:
+    rids: list[str]
+    finished_reasons: list[FinishReason | None]
+    output_ids: list[list[int]]
+
+    # Token counts
+    prompt_tokens: list[int]
+    completion_tokens: list[int]
+    cached_tokens: list[int]
+
+
+@dataclass
 class BatchStrOutput:
     rids: list[str]
     finished_reasons: list[FinishReason | None]

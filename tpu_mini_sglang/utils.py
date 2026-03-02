@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 import traceback
@@ -50,13 +49,3 @@ def get_zmq_socket(context: zmq.Context, socket_type: int, endpoint: str, bind: 
     else:
         socket.connect(endpoint)
     return socket
-
-
-def get_or_create_event_loop() -> asyncio.AbstractEventLoop:
-    """Gets the running event loop or creates a new one if it doesn't exist."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop

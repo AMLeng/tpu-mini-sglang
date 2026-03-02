@@ -17,7 +17,7 @@ from tpu_mini_sglang.managers.io_struct import (
 )
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
-from tpu_mini_sglang.utils import get_or_create_event_loop, get_zmq_socket
+from tpu_mini_sglang.utils import get_zmq_socket
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -124,7 +124,7 @@ class TokenizerManager:
         if self.event_loop is not None:
             return
 
-        self.event_loop = get_or_create_event_loop()
+        self.event_loop = asyncio.get_running_loop()
         self.asyncio_tasks.add(self.event_loop.create_task(self.handle_loop()))
 
     async def handle_loop(self):
