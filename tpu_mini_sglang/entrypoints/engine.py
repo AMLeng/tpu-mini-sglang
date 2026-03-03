@@ -1,6 +1,7 @@
 import multiprocessing as mp
 
 from tpu_mini_sglang.managers.detokenizer_manager import run_detokenizer_process
+from tpu_mini_sglang.managers.scheduler import run_scheduler_process
 from tpu_mini_sglang.managers.tokenizer_manager import TokenizerManager
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 
@@ -13,9 +14,24 @@ def launch_subprocesses(server_args: ServerArgs) -> TokenizerManager:
 
     port_args = PortArgs.init_new()
 
+    # Initialization pipe for blocking until the scheduler is ready
+    scheduler_pipe_reader, scheduler_pipe_writer = mp.Pipe(duplex=False)
+
+    # Since we work with JAX and TPUs, we only need a single scheduler process
+    # in contrast to a GPU approach which needs one per GPU
+    scheduler_process = mp.Process(
+        target=run_scheduler_process, args=(server_args, port_args, scheduler_pipe_writer)
+    )
+    scheduler_process.start()
+
     detokenizer_process = mp.Process(target=run_detokenizer_process, args=(server_args, port_args))
     detokenizer_process.start()
 
     tokenizer_manager = TokenizerManager(server_args, port_args)
+
+    # Block until scheduler is ready, then receive max_req_input_length data
+    scheduler_data = scheduler_pipe_reader.recv()
+
+    tokenizer_manager.max_req_input_length = scheduler_data["max_req_input_len"]
 
     return tokenizer_manager

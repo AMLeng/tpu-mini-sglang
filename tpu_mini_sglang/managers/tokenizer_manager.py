@@ -47,6 +47,10 @@ class TokenizerManager:
         # Init model config
         self.model_path = server_args.model_path
         self.model_config = ModelConfig.from_server_args(server_args)
+        # Max input length is updated to be more restrictive later
+        # once we have information available from the scheduler
+        # Will be used for input verification later
+        self.max_req_input_length = self.model_config.context_len
 
         # Init tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(server_args.model_path)
