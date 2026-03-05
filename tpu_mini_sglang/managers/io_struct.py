@@ -39,6 +39,7 @@ class TokenizedGenerateRequest:
 class BatchTokenIDOutput:
     rids: list[str]
     finished_reasons: list[FinishReason | None]
+    prompt_ids: list[list[int]]
     output_ids: list[list[int]]
 
     # Token counts

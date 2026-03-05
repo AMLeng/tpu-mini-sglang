@@ -11,7 +11,10 @@ def launch_subprocesses(server_args: ServerArgs) -> TokenizerManager:
     Launch detokenizer_process as a separate process,
     and create a tokenizer_manager in the current process and return it.
     """
-
+    # Use "spawn" instead of the default "fork".
+    # This is necessary for JAX, where device state is initialized at import time.
+    # Fork would duplicate that state, creating conflicts.
+    mp.set_start_method("spawn", force=True)
     port_args = PortArgs.init_new()
 
     # Initialization pipe for blocking until the scheduler is ready

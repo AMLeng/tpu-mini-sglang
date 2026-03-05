@@ -7,20 +7,33 @@ dynamic = ["version"]
 
 dependencies = [
   "fastapi>=0.110",
-  "flax>=0.12.0",
-  "jax>=0.8.1",
+  "flax", # Necessary for torchax
+  "jax",
   "orjson>=3.11",
   "psutil",
   "pyzmq>=25.1.2",
   "requests",
+  "safetensors",
   "simple-parsing>=0.1.8",
   "tokenizers>=0.21.1",
+  "torch", # Necessary for torchax
+  "torchax>=0.0.12.dev20260305", # Recent version needed for a fix
   "transformers>=4.57.1,<5",
-  "uvicorn",
-  "uvloop",
+  "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
+cpu = [
+  "jax[cpu]>=0.8.1",
+]
+gpu = [
+  "jax[cuda12]>=0.8.1",
+]
+tpu = [
+  "jax[tpu]>=0.8.1",
+]
+
+[dependency-groups]
 dev = [
   "mypy>=1.19",
   "ruff>=0.11.0",
@@ -28,6 +41,10 @@ dev = [
   "types-psutil",
   "types-requests",
 ]
+
+
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.ruff]
 line-length = 100

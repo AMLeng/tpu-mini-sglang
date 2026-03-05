@@ -13,6 +13,7 @@ class ModelConfig:
             2048,  # Use a conservative fallback
         )
 
+        # set self.hf_eos_token_id
         eos_ids = getattr(self.hf_text_config, "eos_token_id", None)
         if eos_ids is not None:
             # it can be either int or list of int
@@ -20,6 +21,9 @@ class ModelConfig:
         else:
             eos_ids = set()
         self.hf_eos_token_id = eos_ids
+
+        self.bos_token_id = getattr(self.hf_text_config, "bos_token_id", 0)
+
         self.vocab_size = self.hf_text_config.vocab_size
 
     @classmethod

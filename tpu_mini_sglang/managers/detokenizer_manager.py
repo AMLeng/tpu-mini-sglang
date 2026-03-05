@@ -1,10 +1,10 @@
 import logging
 import signal
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import psutil
 import zmq
-from tokenizers import DecodeStream  # type: ignore[import-untyped]
+from tokenizers.decoders import DecodeStream  # type: ignore[import-untyped]
 from transformers import AutoTokenizer
 
 from tpu_mini_sglang.managers.io_struct import (
@@ -25,9 +25,7 @@ class DecodeStatus:
     """
 
     # Tracks ids to be decoded and produces checks of decoded text
-    decode_stream: DecodeStream = field(
-        default_factory=lambda: DecodeStream(skip_special_tokens=True)
-    )
+    decode_stream: DecodeStream
     decoded_text: str = ""  # full value of decoded text
     sent_offset: int = 0  # how much of decoded_text has been sent
 
@@ -84,13 +82,17 @@ class DetokenizerManager:
         output_strs = []
         for i, rid in enumerate(recv_obj.rids):
             if rid not in self.rid_to_status:
-                status = DecodeStatus()
+                status = DecodeStatus(
+                    decode_stream=DecodeStream(ids=recv_obj.prompt_ids[i], skip_special_tokens=True)
+                )
                 self.rid_to_status[rid] = status
             else:
                 status = self.rid_to_status[rid]
 
             for token_id in recv_obj.output_ids[i]:
-                chunk = status.decode_stream.step(self.tokenizer, token_id)
+                # We must get the underlying Tokenizer for the tokenizers library
+                # Rather than the higher level object from transformers that wraps it
+                chunk = status.decode_stream.step(self.tokenizer._tokenizer, token_id)
                 if chunk is not None:
                     status.decoded_text += chunk
 

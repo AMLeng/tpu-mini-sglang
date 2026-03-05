@@ -2,10 +2,12 @@ import logging
 import signal
 from multiprocessing.connection import Connection
 
+import jax
 import psutil
 import zmq
 
 from tpu_mini_sglang.managers.io_struct import (
+    BatchTokenIDOutput,
     TokenizedGenerateRequest,
 )
 from tpu_mini_sglang.managers.scheduler_struct import (
@@ -15,6 +17,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
 )
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
+from tpu_mini_sglang.torchax_utils import get_jitted_function_from_pretrained
 from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
 
 logger = logging.getLogger(__name__)
@@ -27,13 +30,16 @@ class Scheduler:
         self.model_config = ModelConfig.from_server_args(self.server_args)
         self.max_req_len = self.model_config.context_len
 
+        # Init model
+        self.model = get_jitted_function_from_pretrained(self.model_config.model_path)
+
         # Init ZMQ sockets for IPC
         context = zmq.Context(2)  # Creates 2 io threads
         self.recv_from_tokenizer = get_zmq_socket(
             context, zmq.PULL, port_args.scheduler_input_ipc_name, False
         )
         self.send_to_detokenizer = get_zmq_socket(
-            context, zmq.PUSH, port_args.detokenizer_ipc_name, True
+            context, zmq.PUSH, port_args.detokenizer_ipc_name, False
         )
 
         # Init running state
@@ -50,9 +56,9 @@ class Scheduler:
             # Form batches from requests in self.waiting_queue
             self.cur_batch = self._get_next_batch_to_run()
 
-            # if self.cur_batch:
-            # result = self._run_batch(self.cur_batch)
-            # self._process_batch_result(result)
+            if self.cur_batch:
+                result = self._run_batch(self.cur_batch)
+                self._process_batch_result(self.cur_batch, result)
 
     def _recv_requests(self):
         """Read from ZMQ socket until there is nothing left"""
@@ -95,13 +101,89 @@ class Scheduler:
         self.waiting_queue.append(req_state)
 
     def _get_next_batch_to_run(self) -> ScheduleBatch | None:
-        return None
+        # Simplistic brute force logic to get something that works temporarily
+        # Will have much more sophisticated logic once chunked prefill is implemented
 
-    # def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
-    # Run the forward pass and sampling on the device
+        if self.cur_batch is None:
+            batch = ScheduleBatch(reqs=[], model_config=self.model_config)
+        else:
+            batch = self.cur_batch
 
-    def _process_batch_result(self, result: GenerationBatchResult) -> None:
-        pass
+        batch.reqs = [req for req in batch.reqs if req.finished_reason is None]
+        batch.reqs.extend(self.waiting_queue)
+        self.waiting_queue = []
+
+        if len(batch.reqs) == 0:
+            return None
+        else:
+            return batch
+
+    def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        # Run the forward pass and sampling
+        next_token_ids = []
+        for req in batch.reqs:
+            ids = req.origin_input_ids + req.output_ids
+
+            # Add padding to prevent excessive JAX jits
+            # Since we must recompile every time the input is a different size
+            CHUNK_SIZE = 256
+            i = 1
+            while len(ids) > CHUNK_SIZE * i:
+                i += 1
+            # We use bos_token_id as a relatively harmless dummy for padding
+            ids = (CHUNK_SIZE * i - len(ids)) * [self.model_config.bos_token_id] + ids
+
+            input = jax.numpy.array(ids)[None, :]
+            logits = self.model(input).logits[0, -1]
+            next_token_ids.append(jax.numpy.argmax(logits).item())  # Greedy sampling for now
+        return GenerationBatchResult(next_token_ids=next_token_ids)
+
+    def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:
+        """
+        First, use the GenerationBatchResult to update batch.reqs.
+        Then, use the updated batch.reqs to send BatchTokenIDOutput to the detokenizer.
+        """
+        for req, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
+            req.output_ids.append(next_token_id)
+            req.check_finished()
+
+        self._stream_output(batch.reqs)
+
+    def _stream_output(self, reqs: list[ReqState]) -> None:
+        # Constructs and sends the BatchTokenIDOutput from the requests
+        rids = []
+        finished_reasons = []
+        prompt_ids = []
+        output_ids = []
+        prompt_tokens = []
+        completion_tokens = []
+        cached_tokens = []
+
+        for req in reqs:
+            rids.append(req.rid)
+            finished_reasons.append(req.finished_reason)
+            # Also send prompt_ids on the first send
+            # This provides necessary context for the detokenizer
+            if req.send_token_offset == 0:
+                prompt_ids.append(req.origin_input_ids)
+            else:
+                prompt_ids.append([])
+            output_ids.append(req.output_ids[req.send_token_offset :])
+            req.send_token_offset = len(req.output_ids)
+            prompt_tokens.append(len(req.origin_input_ids))
+            completion_tokens.append(len(req.output_ids))
+            cached_tokens.append(0)
+
+        output = BatchTokenIDOutput(
+            rids=rids,
+            finished_reasons=finished_reasons,
+            prompt_ids=prompt_ids,
+            output_ids=output_ids,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+        self.send_to_detokenizer.send_pyobj(output)
 
 
 def run_scheduler_process(server_args: ServerArgs, port_args: PortArgs, pipe_writer: Connection):
