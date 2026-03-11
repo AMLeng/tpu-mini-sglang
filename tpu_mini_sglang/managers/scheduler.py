@@ -2,7 +2,7 @@ import logging
 import signal
 from multiprocessing.connection import Connection
 
-import jax
+import jax.numpy as jnp
 import psutil
 import zmq
 
@@ -16,8 +16,9 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ScheduleBatch,
 )
 from tpu_mini_sglang.model_config import ModelConfig
+from tpu_mini_sglang.models.model_loader import load_model
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
-from tpu_mini_sglang.torchax_utils import get_jitted_function_from_pretrained
+from tpu_mini_sglang.sharding import create_device_mesh
 from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,10 @@ class Scheduler:
         self.max_req_len = self.model_config.context_len
 
         # Init model
-        self.model = get_jitted_function_from_pretrained(self.model_config.model_path)
+        self.mesh = create_device_mesh(
+            data_parallelism=self.server_args.dp, tensor_parallelism=self.server_args.tp
+        )
+        self.model = load_model(config=self.model_config, mesh=self.mesh)
 
         # Init ZMQ sockets for IPC
         context = zmq.Context(2)  # Creates 2 io threads
@@ -127,15 +131,16 @@ class Scheduler:
             # Add padding to prevent excessive JAX jits
             # Since we must recompile every time the input is a different size
             CHUNK_SIZE = 256
-            i = 1
-            while len(ids) > CHUNK_SIZE * i:
-                i += 1
-            # We use bos_token_id as a relatively harmless dummy for padding
-            ids = (CHUNK_SIZE * i - len(ids)) * [self.model_config.bos_token_id] + ids
+            pad_len = (CHUNK_SIZE - (len(ids) % CHUNK_SIZE)) % CHUNK_SIZE
 
-            input = jax.numpy.array(ids)[None, :]
-            logits = self.model(input).logits[0, -1]
-            next_token_ids.append(jax.numpy.argmax(logits).item())  # Greedy sampling for now
+            # We pad with 0s to reach the next chunk size
+            input = jnp.array(ids + pad_len * [0])
+            positions = jnp.concatenate(
+                (jnp.arange(len(ids)), jnp.zeros(pad_len, dtype=jnp.int32)), axis=-1
+            )
+
+            logits = self.model(input, positions)[len(ids) - 1]
+            next_token_ids.append(jnp.argmax(logits).item())  # Greedy sampling for now
         return GenerationBatchResult(next_token_ids=next_token_ids)
 
     def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:

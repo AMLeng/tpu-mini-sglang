@@ -11,6 +11,10 @@ class ServerArgs:
     # This can be a local folder or a Hugging Face repo ID.
     model_path: str
 
+    # Sharding
+    tp: int = 1  # Degree of tensor parallelism
+    dp: int = 1  # Degree of data parallelism
+
     # HTTP Server
 
     host: str = "127.0.0.1"  # The host of the HTTP server.
