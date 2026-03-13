@@ -16,7 +16,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ScheduleBatch,
 )
 from tpu_mini_sglang.model_config import ModelConfig
-from tpu_mini_sglang.models.model_loader import load_model
+from tpu_mini_sglang.models.model_loader import get_jitted_model
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
 from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
@@ -35,7 +35,7 @@ class Scheduler:
         self.mesh = create_device_mesh(
             data_parallelism=self.server_args.dp, tensor_parallelism=self.server_args.tp
         )
-        self.model = load_model(config=self.model_config, mesh=self.mesh)
+        self.model_fn = get_jitted_model(config=self.model_config, mesh=self.mesh)
 
         # Init ZMQ sockets for IPC
         context = zmq.Context(2)  # Creates 2 io threads
@@ -139,7 +139,7 @@ class Scheduler:
                 (jnp.arange(len(ids)), jnp.zeros(pad_len, dtype=jnp.int32)), axis=-1
             )
 
-            logits = self.model(input, positions)[len(ids) - 1]
+            logits = self.model_fn(input, positions)[len(ids) - 1]
             next_token_ids.append(jnp.argmax(logits).item())  # Greedy sampling for now
         return GenerationBatchResult(next_token_ids=next_token_ids)
 

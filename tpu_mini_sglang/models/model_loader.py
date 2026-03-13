@@ -1,6 +1,7 @@
+import functools
 import glob
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import jax
 from flax import nnx
@@ -41,3 +42,13 @@ def load_model(config: ModelConfig, mesh: Mesh) -> ModelBase:
         weight_iterator = _get_weights_iterator(config.model_path)
         model.load_weights(weight_iterator)
         return model
+
+
+def get_jitted_model(config: ModelConfig, mesh: Mesh) -> Callable:
+    model = load_model(config, mesh)
+
+    @jax.jit()
+    def apply_model(my_model: nnx.Module, *args, **kwargs):
+        return my_model(*args, **kwargs)
+
+    return functools.partial(apply_model, model)
