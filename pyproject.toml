@@ -7,7 +7,7 @@ dynamic = ["version"]
 
 dependencies = [
   "fastapi>=0.110",
-  "flax", # Necessary for torchax
+  "flax",
   "jax",
   "orjson>=3.11",
   "psutil",
@@ -16,8 +16,6 @@ dependencies = [
   "safetensors",
   "simple-parsing>=0.1.8",
   "tokenizers>=0.21.1",
-  "torch", # Necessary for torchax
-  "torchax>=0.0.12.dev20260305", # Recent version needed for a fix
   "transformers>=4.57.1,<5",
   "uvicorn[standard]",
 ]
