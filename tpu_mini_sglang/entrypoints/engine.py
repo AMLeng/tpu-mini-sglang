@@ -1,9 +1,14 @@
+import logging
 import multiprocessing as mp
+import signal
 
 from tpu_mini_sglang.managers.detokenizer_manager import run_detokenizer_process
 from tpu_mini_sglang.managers.scheduler import run_scheduler_process
 from tpu_mini_sglang.managers.tokenizer_manager import TokenizerManager
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
+from tpu_mini_sglang.utils import kill_process_tree
+
+logger = logging.getLogger(__name__)
 
 
 def launch_subprocesses(server_args: ServerArgs) -> TokenizerManager:
@@ -11,6 +16,13 @@ def launch_subprocesses(server_args: ServerArgs) -> TokenizerManager:
     Launch detokenizer_process as a separate process,
     and create a tokenizer_manager in the current process and return it.
     """
+
+    def sigquit_handler(signum, frame):
+        logger.error("Received sigquit from a child process. It usually means the child failed.")
+        kill_process_tree()
+
+    signal.signal(signal.SIGQUIT, sigquit_handler)
+
     # Use "spawn" instead of the default "fork".
     # This is necessary for JAX, where device state is initialized at import time.
     # Fork would duplicate that state, creating conflicts.
