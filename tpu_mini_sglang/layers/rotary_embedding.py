@@ -25,8 +25,6 @@ class Llama3RotaryEmbedding(nnx.Module):
         # Scaling config for Llama3.1 and later
         self.rope_scaling = rope_scaling
 
-        self.cos_sin_cache = self._compute_cos_sin_cache()
-
     def _compute_freq(self) -> jax.Array:
         # RoPE frequencies are sometimes called "inverse" frequencies
         # Mathematically, they function as frequencies
@@ -83,9 +81,14 @@ class Llama3RotaryEmbedding(nnx.Module):
         # cos_sin_cache has shape (max_position_embeddings, rotary_dim)
         # Right now, we have only implemented the case rotary_dim == head_dim
 
+        # Computed every call because this should get folded in by jax.jit()
+        # Cannot be computed in the init since initialization happens through nnx.eval_shape,
+        # which would not actually compute the cache values
+        cos_sin_cache = self._compute_cos_sin_cache()
+
         # Llama3 models use NeoX-style, where on the last axis, the first half is treated as real
         # and the second half is treated as imaginary, for a total of head_dim/2 complex dimensions
-        cos, sin = jnp.split(self.cos_sin_cache[positions], 2, axis=-1)
+        cos, sin = jnp.split(cos_sin_cache[positions], 2, axis=-1)
         cos = cos[:, None, :]
         sin = sin[:, None, :]
 

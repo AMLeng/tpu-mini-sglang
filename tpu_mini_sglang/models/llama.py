@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ from tpu_mini_sglang.layers.rotary_embedding import Llama3RotaryEmbedding
 from tpu_mini_sglang.layers.swiglu import SwiGLU as LlamaMLP
 from tpu_mini_sglang.models.model_base import ModelBase
 from tpu_mini_sglang.sharding import ShardingAxisName
+from tpu_mini_sglang.utils import get_jax_dtype
 
 # Should never actually be applied, since all models are loaded abstractly with nnx.eval_shape
 _dummy_init = nnx.initializers.uniform()
@@ -152,17 +153,76 @@ class LlamaModel(nnx.Module):
 
 class LlamaForCausalLM(ModelBase):
     def __init__(self, config: LlamaConfig, mesh: Mesh):
-        dtype = jnp.bfloat16
+        dtype = get_jax_dtype(getattr(config, "dtype", "bfloat16"))
+        self.config = config
         self.model = LlamaModel(config, mesh, dtype)
-        # the language model head is just the unembedding matrix
-        self.lm_head = nnx.Param(
-            _dummy_init(jax.random.key(0), (config.hidden_size, config.vocab_size), dtype),
-            sharding=(None, ShardingAxisName.VOCAB),
-        )
+
+        # the language model head does unembedding
+        if not config.tie_word_embeddings:
+            self.lm_head = nnx.Param(
+                _dummy_init(jax.random.key(0), (config.hidden_size, config.vocab_size), dtype),
+                sharding=(None, ShardingAxisName.VOCAB),
+            )
 
     def __call__(self, input_ids: jax.Array, positions: jax.Array):
         hidden_states = self.model(input_ids, positions)
-        return jnp.dot(hidden_states, self.lm_head.value)
+        if self.config.tie_word_embeddings:
+            return self.model.embed_tokens.attend(hidden_states)
+        else:
+            return jnp.dot(hidden_states, self.lm_head.value)
 
     def load_weights(self, weights: Iterable[tuple[str, jax.Array]]):
-        pass
+        # Construct a dict of flattened field names to Params
+        flat_state = {
+            ".".join(str(x) for x in field_name_tuple): cast(nnx.Variable, param)
+            for field_name_tuple, param in nnx.state(self).flat_state()
+        }
+
+        # The loop happens in three steps:
+        # - Rename the Huggingface weight keys
+        # - Transpose and reshape
+        # - Error check and assign
+        for key, weight in weights:
+            # Hard coded param renaming logic
+            # Handle weight suffixes
+            key = key.replace("embed_tokens.weight", "embed_tokens.embedding")
+            key = key.replace("norm.weight", "norm.scale")
+            key = key.replace("proj.weight", "proj.kernel")
+            key = key.replace("lm_head.weight", "lm_head")
+            # Handle layer names
+            key = key.replace("post_attention_layernorm", "mlp_norm")
+            key = key.replace("input_layernorm", "attention_norm")
+            key = key.replace("self_attn", "attention")
+
+            # Handle all transpositions and reshapings
+            # Transpose all linear weights
+            if key.endswith(".kernel"):
+                weight = weight.T
+            if key == "lm_head":
+                weight = weight.T
+            # Reshape all four attention projections
+            if any(f"attention.{x}_proj" in key for x in "qkvo"):
+                weight = weight.reshape(flat_state[key].value.shape)
+
+            # Error checking
+            val = flat_state[key].value
+            if val.dtype != weight.dtype:
+                raise RuntimeError(
+                    f"Type mismatch when assigning weight of type {weight.dtype} "
+                    f"to field {key} of type {val.dtype}. Note that quantization "
+                    "is not yet supported by this library."
+                )
+            if val.shape != weight.shape:
+                raise RuntimeError(
+                    f"Shape mismatch when assigning weight of shape {weight.shape} "
+                    f"to field {key} of shape {val.shape}."
+                )
+
+            flat_state[key].value = weight
+            # Keep track of which weights have been assigned by removing them from the dict
+            del flat_state[key]
+
+        if flat_state:
+            raise RuntimeError(
+                f"Model parameters missing weights from the loaded checkpoint: {flat_state.keys()}"
+            )

@@ -3,7 +3,9 @@ import sys
 import traceback
 from contextlib import suppress
 
+import jax.numpy as jnp
 import psutil
+import torch
 import zmq
 
 
@@ -49,3 +51,10 @@ def get_zmq_socket(context: zmq.Context, socket_type: int, endpoint: str, bind: 
     else:
         socket.connect(endpoint)
     return socket
+
+
+def get_jax_dtype(config_dtype: str | torch.dtype) -> jnp.dtype:
+    config_dtype = str(config_dtype)
+    if "torch" in config_dtype:
+        config_dtype = config_dtype.split(".")[-1]
+    return jnp.dtype(config_dtype)
