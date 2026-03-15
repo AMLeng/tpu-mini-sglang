@@ -156,6 +156,7 @@ class LlamaForCausalLM(ModelBase):
         dtype = get_jax_dtype(getattr(config, "dtype", "bfloat16"))
         self.config = config
         self.model = LlamaModel(config, mesh, dtype)
+        self.mesh = mesh
 
         # the language model head does unembedding
         if not config.tie_word_embeddings:
@@ -175,7 +176,7 @@ class LlamaForCausalLM(ModelBase):
         # Construct a dict of flattened field names to Params
         flat_state = {
             ".".join(str(x) for x in field_name_tuple): cast(nnx.Variable, param)
-            for field_name_tuple, param in nnx.state(self).flat_state()
+            for field_name_tuple, param in nnx.to_flat_state(nnx.state(self))
         }
 
         # The loop happens in three steps:
@@ -218,7 +219,12 @@ class LlamaForCausalLM(ModelBase):
                     f"to field {key} of shape {val.shape}."
                 )
 
-            flat_state[key].value = weight
+            # We loaded all the weights on CPU, so before assignment we apply the stored sharding
+            # Otherwise, we could just clobber our sharded variables with the unsharded weights
+            flat_state[key].value = jax.device_put(
+                weight, nnx.get_named_sharding(flat_state[key], self.mesh).value
+            )
+
             # Keep track of which weights have been assigned by removing them from the dict
             del flat_state[key]
 
