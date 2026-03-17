@@ -10,6 +10,7 @@ from transformers import LlamaConfig
 from tpu_mini_sglang.layers.attention import Attention
 from tpu_mini_sglang.layers.rotary_embedding import Llama3RotaryEmbedding
 from tpu_mini_sglang.layers.swiglu import SwiGLU as LlamaMLP
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 from tpu_mini_sglang.models.model_base import ModelBase
 from tpu_mini_sglang.sharding import ShardingAxisName
 from tpu_mini_sglang.utils import get_jax_dtype
@@ -88,9 +89,9 @@ class LlamaAttention(nnx.Module):
         q, k = self.rotary_embedding(positions, q, k)
         return q, k, v
 
-    def __call__(self, x: jax.Array, positions: jax.Array):
-        q, k, v = self._forward_prepare(positions, x)
-        output = self.attention(q, k, v)
+    def __call__(self, x: jax.Array, forward_batch: ForwardBatch):
+        q, k, v = self._forward_prepare(forward_batch.positions, x)
+        output = self.attention(q, k, v, forward_batch)
         return self.o_proj(output)
 
 
@@ -117,10 +118,10 @@ class LlamaDecoderLayer(nnx.Module):
             config.hidden_size, epsilon=config.rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
 
-    def __call__(self, x: jax.Array, positions: jax.Array):
+    def __call__(self, x: jax.Array, forward_batch: ForwardBatch):
         # We upcast the input to float32 before the norm for numerical stability, matching SGLang
         normed_x = self.attention_norm(x.astype(jnp.float32)).astype(x.dtype)
-        h = x + self.attention(normed_x, positions)
+        h = x + self.attention(normed_x, forward_batch)
         normed_h = self.mlp_norm(h.astype(jnp.float32)).astype(h.dtype)
         out = h + self.mlp(normed_h)
         return out
@@ -143,10 +144,10 @@ class LlamaModel(nnx.Module):
             config.hidden_size, epsilon=config.rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
 
-    def __call__(self, input_ids: jax.Array, positions: jax.Array):
-        hidden_states = self.embed_tokens(input_ids)
+    def __call__(self, forward_batch: ForwardBatch):
+        hidden_states = self.embed_tokens(forward_batch.input_ids)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, positions)
+            hidden_states = layer(hidden_states, forward_batch)
         # We upcast the input to float32 before the norm for numerical stability, matching SGLang
         return self.norm(hidden_states.astype(jnp.float32)).astype(hidden_states.dtype)
 
@@ -165,8 +166,8 @@ class LlamaForCausalLM(ModelBase):
                 sharding=(None, ShardingAxisName.VOCAB),
             )
 
-    def __call__(self, input_ids: jax.Array, positions: jax.Array):
-        hidden_states = self.model(input_ids, positions)
+    def __call__(self, forward_batch: ForwardBatch):
+        hidden_states = self.model(forward_batch)
         if self.config.tie_word_embeddings:
             return self.model.embed_tokens.attend(hidden_states)
         else:

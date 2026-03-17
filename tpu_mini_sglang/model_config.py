@@ -7,6 +7,15 @@ class ModelConfig:
     def __init__(self, model_path: str, context_length: int | None = None):
         self.model_path = model_path
         self.hf_text_config = AutoConfig.from_pretrained(self.model_path)
+
+        self.num_heads = self.hf_text_config.num_attention_heads
+        self.num_kv_heads = getattr(self.hf_text_config, "num_key_value_heads", self.num_heads)
+        self.head_dim = getattr(
+            self.hf_text_config,
+            "head_dim",
+            self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
+        )
+
         self.context_len = context_length or getattr(
             self.hf_text_config,
             "max_position_embeddings",

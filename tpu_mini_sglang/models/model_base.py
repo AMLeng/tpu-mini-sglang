@@ -6,6 +6,8 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
+
 
 class ModelBase(ABC, nnx.Module):
     @abstractmethod
@@ -14,7 +16,7 @@ class ModelBase(ABC, nnx.Module):
         pass
 
     @abstractmethod
-    def __call__(self, input_ids: jax.Array, positions: jax.Array) -> jax.Array:
+    def __call__(self, forward_batch: ForwardBatch) -> jax.Array:
         """Calls the model with the given position info, returning logits"""
         pass
 

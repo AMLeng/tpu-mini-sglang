@@ -2,7 +2,6 @@ import logging
 import signal
 from multiprocessing.connection import Connection
 
-import jax.numpy as jnp
 import psutil
 import zmq
 
@@ -16,7 +15,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ScheduleBatch,
 )
 from tpu_mini_sglang.model_config import ModelConfig
-from tpu_mini_sglang.models.model_loader import get_jitted_model
+from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
 from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
@@ -31,12 +30,6 @@ class Scheduler:
         self.model_config = ModelConfig.from_server_args(self.server_args)
         self.max_req_len = self.model_config.context_len
 
-        # Init model
-        self.mesh = create_device_mesh(
-            data_parallelism=self.server_args.dp, tensor_parallelism=self.server_args.tp
-        )
-        self.model_fn = get_jitted_model(config=self.model_config, mesh=self.mesh)
-
         # Init ZMQ sockets for IPC
         context = zmq.Context(2)  # Creates 2 io threads
         self.recv_from_tokenizer = get_zmq_socket(
@@ -49,6 +42,15 @@ class Scheduler:
         # Init running state
         self.waiting_queue: list[ReqState] = []
         self.cur_batch: ScheduleBatch | None = None
+
+        # Init model runner
+        self.mesh = create_device_mesh(
+            data_parallelism=self.server_args.dp, tensor_parallelism=self.server_args.tp
+        )
+        self.model_runner = ModelRunner(
+            self.model_config,
+            self.mesh,
+        )
 
     def run_event_loop(self):
         while True:
@@ -123,25 +125,7 @@ class Scheduler:
             return batch
 
     def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
-        # Run the forward pass and sampling
-        next_token_ids = []
-        for req in batch.reqs:
-            ids = req.origin_input_ids + req.output_ids
-
-            # Add padding to prevent excessive JAX jits
-            # Since we must recompile every time the input is a different size
-            CHUNK_SIZE = 256
-            pad_len = (CHUNK_SIZE - (len(ids) % CHUNK_SIZE)) % CHUNK_SIZE
-
-            # We pad with 0s to reach the next chunk size
-            input = jnp.array(ids + pad_len * [0])
-            positions = jnp.concatenate(
-                (jnp.arange(len(ids)), jnp.zeros(pad_len, dtype=jnp.int32)), axis=-1
-            )
-
-            logits = self.model_fn(input, positions)[len(ids) - 1]
-            next_token_ids.append(jnp.argmax(logits).item())  # Greedy sampling for now
-        return GenerationBatchResult(next_token_ids=next_token_ids)
+        return self.model_runner.forward_batch_generation(batch)
 
     def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:
         """

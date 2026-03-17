@@ -2,7 +2,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from tpu_mini_sglang.layers.attention_backends.naive_attention import NaiveAttention
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 
 
 class Attention(nnx.Module):
@@ -13,20 +13,17 @@ class Attention(nnx.Module):
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.mesh = mesh
-        self.attention_backend = NaiveAttention(
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads,
-        )
 
     def __call__(
         self,
         q: jax.Array,
         k: jax.Array,
         v: jax.Array,
+        forward_batch: ForwardBatch,
     ):
-        return self.attention_backend(
+        return forward_batch.attn_backend(
             q,
             k,
             v,
+            forward_batch,
         )
