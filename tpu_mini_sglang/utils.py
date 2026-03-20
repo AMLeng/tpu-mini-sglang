@@ -2,10 +2,14 @@ import os
 import sys
 import traceback
 from contextlib import suppress
+from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 import psutil
 import zmq
+
+if TYPE_CHECKING:
+    from tpu_mini_sglang.model_config import ModelConfig
 
 
 def get_exception_traceback():
@@ -57,3 +61,23 @@ def get_jax_dtype(config_dtype) -> jnp.dtype:
     if "torch" in config_dtype:
         config_dtype = config_dtype.split(".")[-1]
     return jnp.dtype(config_dtype)
+
+
+def approximate_model_size(model_config: ModelConfig, dtype_size: int):
+    # Conservatively estimate the memory footprint of a model
+    mlp_params = (
+        model_config.num_layers
+        * model_config.hidden_size
+        * model_config.intermediate_size
+        * 3  # Assume MLP layer is a GLU
+    )
+    attention_params = (
+        model_config.num_layers
+        * model_config.hidden_size
+        * model_config.head_dim
+        * (
+            2 * model_config.num_heads + 2 * model_config.num_kv_heads  # From q/o, k/v
+        )
+    )
+    embedding_params = 2 * model_config.hidden_size * model_config.vocab_size
+    return dtype_size * (mlp_params + attention_params + embedding_params)

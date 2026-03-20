@@ -16,12 +16,14 @@ class Attention(nnx.Module):
 
     def __call__(
         self,
+        kv_cache: jax.Array,
         q: jax.Array,
         k: jax.Array,
         v: jax.Array,
         forward_batch: ForwardBatch,
     ):
         return forward_batch.attn_backend(
+            kv_cache,
             q,
             k,
             v,

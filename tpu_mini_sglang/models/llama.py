@@ -89,10 +89,10 @@ class LlamaAttention(nnx.Module):
         q, k = self.rotary_embedding(positions, q, k)
         return q, k, v
 
-    def __call__(self, x: jax.Array, forward_batch: ForwardBatch):
+    def __call__(self, kv_cache: jax.Array, x: jax.Array, forward_batch: ForwardBatch):
         q, k, v = self._forward_prepare(forward_batch.positions, x)
-        output = self.attention(q, k, v, forward_batch)
-        return self.o_proj(output)
+        new_kv_cache, output = self.attention(kv_cache, q, k, v, forward_batch)
+        return new_kv_cache, self.o_proj(output)
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -118,13 +118,14 @@ class LlamaDecoderLayer(nnx.Module):
             config.hidden_size, epsilon=config.rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
 
-    def __call__(self, x: jax.Array, forward_batch: ForwardBatch):
+    def __call__(self, kv_cache: jax.Array, x: jax.Array, forward_batch: ForwardBatch):
         # We upcast the input to float32 before the norm for numerical stability, matching SGLang
         normed_x = self.attention_norm(x.astype(jnp.float32)).astype(x.dtype)
-        h = x + self.attention(normed_x, forward_batch)
+        new_kv_cache, attention_output = self.attention(kv_cache, normed_x, forward_batch)
+        h = x + attention_output
         normed_h = self.mlp_norm(h.astype(jnp.float32)).astype(h.dtype)
         out = h + self.mlp(normed_h)
-        return out
+        return new_kv_cache, out
 
 
 class LlamaModel(nnx.Module):
@@ -144,12 +145,14 @@ class LlamaModel(nnx.Module):
             config.hidden_size, epsilon=config.rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
 
-    def __call__(self, forward_batch: ForwardBatch):
+    def __call__(self, kv_caches: list[jax.Array], forward_batch: ForwardBatch):
         hidden_states = self.embed_tokens(forward_batch.input_ids)
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, forward_batch)
+        for i, layer in enumerate(self.layers):
+            kv_cache = kv_caches[i]
+            kv_cache, hidden_states = layer(kv_cache, hidden_states, forward_batch)
+            kv_caches[i] = kv_cache
         # We upcast the input to float32 before the norm for numerical stability, matching SGLang
-        return self.norm(hidden_states.astype(jnp.float32)).astype(hidden_states.dtype)
+        return kv_caches, self.norm(hidden_states.astype(jnp.float32)).astype(hidden_states.dtype)
 
 
 class LlamaForCausalLM(ModelBase):
@@ -166,12 +169,12 @@ class LlamaForCausalLM(ModelBase):
                 sharding=(None, ShardingAxisName.VOCAB),
             )
 
-    def __call__(self, forward_batch: ForwardBatch):
-        hidden_states = self.model(forward_batch)
+    def __call__(self, kv_caches: list[jax.Array], forward_batch: ForwardBatch):
+        kv_caches, hidden_states = self.model(kv_caches, forward_batch)
         if self.config.tie_word_embeddings:
-            return self.model.embed_tokens.attend(hidden_states)
+            return kv_caches, self.model.embed_tokens.attend(hidden_states)
         else:
-            return jnp.dot(hidden_states, self.lm_head.value)
+            return kv_caches, jnp.dot(hidden_states, self.lm_head.value)
 
     def load_weights(self, weights: Iterable[tuple[str, jax.Array]]):
         # Construct a dict of flattened field names to Params

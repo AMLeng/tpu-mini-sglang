@@ -2,6 +2,7 @@ import logging
 import signal
 from multiprocessing.connection import Connection
 
+import numpy as np
 import psutil
 import zmq
 
@@ -14,6 +15,8 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ReqState,
     ScheduleBatch,
 )
+from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
+from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
@@ -52,6 +55,13 @@ class Scheduler:
             self.mesh,
         )
 
+        # Init KV Cache
+        self._init_memory_pool(
+            max_kv_tokens=self.model_runner.get_max_kv_tokens(self.model_config.dtype),
+            page_size=1,
+            kv_cache_dtype=self.model_config.dtype,
+        )
+
     def run_event_loop(self):
         while True:
             recv_reqs = self._recv_requests()
@@ -88,7 +98,7 @@ class Scheduler:
 
     def _handle_generate_request(self, recv_req: TokenizedGenerateRequest):
         """Create ReqState for the request and add it to the queue."""
-        req_state = ReqState(
+        req_state = ReqState.init_new(
             rid=recv_req.rid,
             origin_input_ids=recv_req.input_ids,
             sampling_params=recv_req.sampling_params,
@@ -110,33 +120,65 @@ class Scheduler:
         # Simplistic brute force logic to get something that works temporarily
         # Will have much more sophisticated logic once chunked prefill is implemented
 
-        if self.cur_batch is None:
-            batch = ScheduleBatch(reqs=[], model_config=self.model_config)
-        else:
-            batch = self.cur_batch
+        can_run_list = []
+        if self.cur_batch:
+            can_run_list = self.cur_batch.reqs
+        for req in self.waiting_queue:
+            if self.req_to_token_pool.available_size() <= 0:
+                break
 
-        batch.reqs = [req for req in batch.reqs if req.finished_reason is None]
-        batch.reqs.extend(self.waiting_queue)
-        self.waiting_queue = []
+            # Requests from the waiting queue will have nothing in the KV cache
+            # We could use more intelligent logic here
+            # For now we use the conservative strategy to avoid dealing with cache evictions
+            expected_tokens = req.sampling_params.max_new_tokens
+            if self.token_to_kv_pool_allocator.available_size() < expected_tokens:
+                continue
+            can_run_list.append(req)
 
-        if len(batch.reqs) == 0:
+        self.waiting_queue = [req for req in self.waiting_queue if req not in can_run_list]
+
+        if len(can_run_list) <= 0:
             return None
-        else:
-            return batch
+
+        batch = ScheduleBatch.init_new(
+            reqs=can_run_list,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            model_config=self.model_config,
+        )
+
+        batch.prepare()
+        return batch
 
     def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
-        return self.model_runner.forward_batch_generation(batch)
+        return self.model_runner.forward_batch_generation(self.kv_cache, batch)
 
     def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:
         """
         First, use the GenerationBatchResult to update batch.reqs.
         Then, use the updated batch.reqs to send BatchTokenIDOutput to the detokenizer.
+        Finally, remove finished requests and free kv cache
         """
         for req, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
             req.output_ids.append(next_token_id)
             req.check_finished()
 
         self._stream_output(batch.reqs)
+
+        # Free caches and filter batch
+        finished_reqs = [r for r in batch.reqs if r.finished_reason is not None]
+        req_pool_indices = []
+        for req in finished_reqs:
+            assert req.req_pool_idx is not None
+            self.token_to_kv_pool_allocator.free(
+                self.req_to_token_pool.read(
+                    req.req_pool_idx, len(req.origin_input_ids) + len(req.output_ids)
+                )
+            )
+            req_pool_indices.append(req.req_pool_idx)
+        self.req_to_token_pool.free(req_pool_indices)
+
+        batch.reqs = [req for req in batch.reqs if req.finished_reason is None]
 
     def _stream_output(self, reqs: list[ReqState]) -> None:
         # Constructs and sends the BatchTokenIDOutput from the requests
@@ -173,6 +215,37 @@ class Scheduler:
             cached_tokens=cached_tokens,
         )
         self.send_to_detokenizer.send_pyobj(output)
+
+    def _init_memory_pool(
+        self,
+        max_kv_tokens: int,
+        page_size: int,
+        kv_cache_dtype: np.dtype,
+    ):
+        # Formula from SGLang
+        max_running_requests = min(
+            max(
+                int(max_kv_tokens / self.model_config.context_len * 512),
+                2048,
+            ),
+            4096,
+        )
+
+        self.req_to_token_pool = ReqToTokenPool(
+            max_running_requests=max_running_requests, max_context_len=self.model_config.context_len
+        )
+        self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
+            size=max_kv_tokens,
+        )
+        self.kv_cache = MHATokenToKVPool(
+            cache_size=max_kv_tokens,
+            page_size=page_size,
+            num_layers=self.model_config.num_layers,
+            num_kv_heads=self.model_config.num_kv_heads,
+            head_dim=self.model_config.head_dim,
+            mesh=self.mesh,
+            dtype=kv_cache_dtype,
+        )
 
 
 def run_scheduler_process(server_args: ServerArgs, port_args: PortArgs, pipe_writer: Connection):

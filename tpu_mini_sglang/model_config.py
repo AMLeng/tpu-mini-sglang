@@ -1,6 +1,7 @@
 from transformers import AutoConfig
 
 from tpu_mini_sglang.server_args import ServerArgs
+from tpu_mini_sglang.utils import get_jax_dtype
 
 
 class ModelConfig:
@@ -15,6 +16,13 @@ class ModelConfig:
             "head_dim",
             self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
         )
+        self.hidden_size = self.hf_text_config.hidden_size
+        self.intermediate_size = getattr(
+            self.hf_text_config, "intermediate_size", 4 * self.hf_text_config.hidden_size
+        )
+        self.dtype = get_jax_dtype(getattr(self.hf_text_config, "dtype", "bfloat16"))
+
+        self.num_layers = self.hf_text_config.num_hidden_layers
 
         self.context_len = context_length or getattr(
             self.hf_text_config,

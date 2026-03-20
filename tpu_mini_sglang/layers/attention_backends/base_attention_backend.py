@@ -10,6 +10,7 @@ class BaseAttentionBackend(ABC, nnx.Module):
     @abstractmethod
     def __call__(
         self,
+        kv_cache: jax.Array,
         q: jax.Array,  # (num_tokens, num_heads, head_dim)
         k: jax.Array,  # (num_kv_tokens, num_kv_heads, head_dim)
         v: jax.Array,  # (num_kv_tokens, num_kv_heads, head_dim)
@@ -19,4 +20,7 @@ class BaseAttentionBackend(ABC, nnx.Module):
 
     @abstractmethod
     def init_forward_metadata(self, forward_batch: ForwardBatch):
+        # Called before the JIT boundary to let each attention backend
+        # compute batch-dependent metadata (e.g., static pytree fields that control
+        # recompilation) without adding backend-specific fields to ForwardBatch.
         pass

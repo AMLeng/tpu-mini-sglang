@@ -47,8 +47,8 @@ def load_model(config: ModelConfig, mesh: Mesh) -> ModelBase:
 def get_jitted_model(config: ModelConfig, mesh: Mesh) -> Callable:
     model = load_model(config, mesh)
 
-    @jax.jit()
-    def apply_model(my_model: nnx.Module, *args, **kwargs):
-        return my_model(*args, **kwargs)
+    @jax.jit(donate_argnames=("kv_caches",))
+    def apply_model(my_model: nnx.Module, kv_caches: list[jax.Array], *args, **kwargs):
+        return my_model(kv_caches, *args, **kwargs)
 
     return functools.partial(apply_model, model)

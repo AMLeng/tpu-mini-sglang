@@ -18,50 +18,78 @@ if TYPE_CHECKING:
 
 # We need register_dataclass since ForwardBatch is passed to the jit-ed model function
 # Registering it allows it to be passed through the jit boundary as a pytree
+# Note that with register_dataclass, non-data fields must be marked explicitly
+# Otherwise, jax will trace everything as children
 @register_dataclass
 @dataclass
 class ForwardBatch:
-    # With register_dataclass, non-data fields must be marked explicitly
-    # Otherwise, jax will trace everything as children
+    # A ForwardBatch should contain only TPU structures to pass into the model
     input_ids: jax.Array
     positions: jax.Array
     seq_lens: jax.Array
 
+    # KV Cache info
+    req_pool_indices: jax.Array  # Indices of request in ReqToTokenPool
+    req_to_token: jax.Array  # (max_running_requests, max_context_len) page table
+    out_cache_loc: jax.Array
+
     attn_backend: BaseAttentionBackend
 
-    extend_start_loc: jax.Array
+    extend_lens: jax.Array
 
     @classmethod
     def init_new(cls, batch: ScheduleBatch, model_runner: ModelRunner):
         input_ids: list[int] = []
         positions: list[int] = []
         seq_lens: list[int] = []
+        extend_lens: list[int] = []
+        req_pool_indices: list[int] = []
 
         # Gather request information together
         for req in batch.reqs:
-            ids = req.origin_input_ids + req.output_ids
-            seq_len = len(ids)
+            assert req.req_pool_idx is not None
+            # Slice ids and positions to only include the uncached portion
+            full_ids = req.origin_input_ids + req.output_ids
+            full_positions = range(len(full_ids))
+            req_ids = full_ids[-req.extend_len :]
+            req_positions = full_positions[-req.extend_len :]
 
-            input_ids.extend(ids)
-            positions.extend(range(seq_len))
-            seq_lens.append(seq_len)
+            input_ids.extend(req_ids)
+            positions.extend(req_positions)
+            extend_lens.append(req.extend_len)
+
+            seq_lens.append(len(full_ids))
+            req_pool_indices.append(req.req_pool_idx)
 
         # Add padding to prevent excessive JAX jits
         # Since we must recompile every time the input is a different size
-        ID_CHUNK_SIZE = 256
-        pad_len = (ID_CHUNK_SIZE - (len(input_ids) % ID_CHUNK_SIZE)) % ID_CHUNK_SIZE
+        QUERY_CHUNK_SIZE = 256
+        query_pad_len = (QUERY_CHUNK_SIZE - (len(input_ids) % QUERY_CHUNK_SIZE)) % QUERY_CHUNK_SIZE
         BATCH_CHUNK_SIZE = 4
         batch_pad_len = (BATCH_CHUNK_SIZE - (len(seq_lens) % BATCH_CHUNK_SIZE)) % BATCH_CHUNK_SIZE
 
         # Construct arrays on the tpu(s)
-        jax_input_ids = jnp.array(input_ids + pad_len * [0])
-        jax_positions = jnp.array(positions + pad_len * [0])
+        jax_input_ids = jnp.array(input_ids + query_pad_len * [0])
+        jax_positions = jnp.array(positions + query_pad_len * [0])
+        # Padding for out_cache_loc *MUST* be 0 since it the 0 page of the KV cache is specifically
+        # reserved for junk padding token writes
+        assert batch.out_cache_loc is not None
+        jax_out_cache_loc = jnp.array(list(batch.out_cache_loc) + query_pad_len * [0])
         jax_seq_lens = jnp.array(seq_lens + batch_pad_len * [0])
+        jax_extend_lens = jnp.array(extend_lens + batch_pad_len * [0])
+        jax_req_pool_indices = jnp.array(req_pool_indices + batch_pad_len * [0])
 
+        # Right now we copy over req_to_token to the GPU on every batch construction
+        # This makes the CPU/TPU divide clear, where req_to_token_pool is cpu-only
+        # We should attempt to refactor to remove this copy in the future, while still
+        # keeping the cpu/tpu divide as intact as possible
         return cls(
             input_ids=jax_input_ids,
             positions=jax_positions,
             seq_lens=jax_seq_lens,
-            extend_start_loc=jnp.cumsum(jax_seq_lens),
+            req_pool_indices=jax_req_pool_indices,
+            req_to_token=jnp.array(batch.req_to_token_pool.req_to_token),
+            extend_lens=jax_extend_lens,
+            out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,
         )

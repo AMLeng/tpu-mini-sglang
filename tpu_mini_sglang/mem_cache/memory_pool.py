@@ -33,16 +33,18 @@ class ReqToTokenPool:
     def available_size(self):
         return len(self.free_slots)
 
-    def write(self, indices: tuple[int, slice], values: np.ndarray) -> None:
+    def write(
+        self, indices: tuple[int, slice] | tuple[np.ndarray, np.ndarray], values: np.ndarray
+    ) -> None:
         self.req_to_token[indices] = values
 
     def read(self, req_idx: int, length: int) -> np.ndarray:
         return self.req_to_token[req_idx, :length].copy()
 
-    def free(self, free_index: np.ndarray):
-        self.free_slots = np.concatenate([self.free_slots, np.array(free_index)])
+    def free(self, free_index: list[int]):
+        self.free_slots = np.concatenate([self.free_slots, np.asarray(free_index, dtype=np.int32)])
 
-    def alloc(self, need_size: int):
+    def alloc(self, need_size: int) -> np.ndarray | None:
         if need_size > self.available_size():
             return None
         ret = self.free_slots[:need_size]
@@ -53,7 +55,7 @@ class ReqToTokenPool:
 @register_pytree_node_class
 class MHATokenToKVPool:
     """
-    TokenToKVPool holds the actual caches
+    TokenToKVPool holds the actual caches, which are JAX arrays sharded on the TPUs
     On the device, we index directly into the k/v buffers with indices from ReqToTokenPool
     Other core KV cache classes:
     ReqToTokenPool maps a request to the locations of its tokens in the KV cache
@@ -84,12 +86,6 @@ class MHATokenToKVPool:
             )()
             for _ in range(num_layers)
         ]
-
-    def get_kv_buffer(self, layer_id: int) -> jax.Array:
-        return self.kv_buffer[layer_id]
-
-    def set_kv_buffer(self, layer_id: int, loc, cache_k: jax.Array, cache_v: jax.Array):
-        raise NotImplementedError("Not implemented")
 
     def tree_flatten(self):
         children = (self.kv_buffer,)

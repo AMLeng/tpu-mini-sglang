@@ -16,8 +16,10 @@ class ModelBase(ABC, nnx.Module):
         pass
 
     @abstractmethod
-    def __call__(self, forward_batch: ForwardBatch) -> jax.Array:
-        """Calls the model with the given position info, returning logits"""
+    def __call__(
+        self, kv_caches: list[jax.Array], forward_batch: ForwardBatch
+    ) -> tuple[list[jax.Array], jax.Array]:
+        """Calls the model with the given position info, returning kv_caches, logits"""
         pass
 
     @abstractmethod

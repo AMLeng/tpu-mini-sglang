@@ -20,12 +20,14 @@ class TokenToKVPoolAllocator:
         self.free_pages = np.arange(1, self.size + 1, dtype=np.int32)
 
     def available_size(self):
+        # Available size in tokens; implicit multiply by page size of 1
         return len(self.free_pages)
 
     def free(self, free_index: np.ndarray):
+        # np.array makes a copy so it is safe to concat
         self.free_pages = np.concatenate([self.free_pages, np.array(free_index)])
 
-    def alloc(self, need_size: int):
+    def alloc(self, need_size: int) -> np.ndarray | None:
         if need_size > self.available_size():
             return None
         ret = self.free_pages[:need_size]
