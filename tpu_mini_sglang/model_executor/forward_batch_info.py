@@ -79,10 +79,9 @@ class ForwardBatch:
         jax_extend_lens = jnp.array(extend_lens + batch_pad_len * [0])
         jax_req_pool_indices = jnp.array(req_pool_indices + batch_pad_len * [0])
 
-        # Right now we copy over req_to_token to the GPU on every batch construction
-        # This makes the CPU/TPU divide clear, where req_to_token_pool is cpu-only
-        # We should attempt to refactor to remove this copy in the future, while still
-        # keeping the cpu/tpu divide as intact as possible
+        # Right now we copy over req_to_token from CPU to the TPU on every batch construction
+        # This makes the CPU/TPU divide clear and avoids unnecessary CPU/TPU synchronization
+        # This also lets us update req_to_token on the CPU, while the TPU copy is read-only
         return cls(
             input_ids=jax_input_ids,
             positions=jax_positions,
