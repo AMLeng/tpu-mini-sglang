@@ -12,7 +12,7 @@ from tpu_mini_sglang.managers.io_struct import (
     BatchTokenIDOutput,
 )
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
-from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
+from tpu_mini_sglang.utils import configure_logger, get_exception_traceback, get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ class DetokenizerManager:
 
 
 def run_detokenizer_process(server_args: ServerArgs, port_args: PortArgs):
+    configure_logger(server_args, prefix="DetokenizerManager:")
     parent = psutil.Process().parent()
     try:
         manager = DetokenizerManager(server_args, port_args)

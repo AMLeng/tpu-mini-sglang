@@ -21,7 +21,7 @@ from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
-from tpu_mini_sglang.utils import get_exception_traceback, get_zmq_socket
+from tpu_mini_sglang.utils import configure_logger, get_exception_traceback, get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,7 @@ class Scheduler:
 
 
 def run_scheduler_process(server_args: ServerArgs, port_args: PortArgs, pipe_writer: Connection):
+    configure_logger(server_args, prefix="Scheduler:")
     parent = psutil.Process().parent()
     try:
         scheduler = Scheduler(server_args, port_args)

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import traceback
@@ -10,6 +11,7 @@ import zmq
 
 if TYPE_CHECKING:
     from tpu_mini_sglang.model_config import ModelConfig
+    from tpu_mini_sglang.server_args import ServerArgs
 
 
 def get_exception_traceback():
@@ -81,3 +83,13 @@ def approximate_model_size(model_config: ModelConfig, dtype_size: int):
     )
     embedding_params = 2 * model_config.hidden_size * model_config.vocab_size
     return dtype_size * (mlp_params + attention_params + embedding_params)
+
+
+def configure_logger(server_args: ServerArgs, prefix: str = ""):
+    log_format = f"[%(asctime)s {prefix}%(name)s] %(message)s"
+    logging.basicConfig(
+        level=getattr(logging, server_args.log_level.upper()),
+        format=log_format,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
