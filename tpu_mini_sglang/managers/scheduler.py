@@ -12,7 +12,9 @@ from tpu_mini_sglang.managers.io_struct import (
 )
 from tpu_mini_sglang.managers.scheduler_struct import (
     GenerationBatchResult,
-    ReqState,
+    NewReqState,
+    ProcessedReqState,
+    ReqInfo,
     ScheduleBatch,
 )
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
@@ -43,8 +45,8 @@ class Scheduler:
         )
 
         # Init running state
-        self.waiting_queue: list[ReqState] = []
-        self.cur_batch: ScheduleBatch | None = None
+        self.waiting_queue: list[ReqInfo] = []
+        self.running_decode_batch: ScheduleBatch | None = None
 
         # Init model runner
         self.mesh = create_device_mesh(
@@ -70,11 +72,18 @@ class Scheduler:
             self._process_input_requests(recv_reqs)
 
             # Form batches from requests in self.waiting_queue
-            self.cur_batch = self._get_next_batch_to_run()
+            cur_batch = self._get_next_batch_to_run()
 
-            if self.cur_batch:
-                result = self._run_batch(self.cur_batch)
-                self._process_batch_result(self.cur_batch, result)
+            if cur_batch:
+                result = self._run_batch(cur_batch)
+                new_decode_batch = self._process_batch_result(cur_batch, result)
+                if new_decode_batch is None:
+                    continue
+                if self.running_decode_batch:
+                    # Both batches we merge are prepared and ready to run
+                    self.running_decode_batch.merge_batch(new_decode_batch)
+                else:
+                    self.running_decode_batch = new_decode_batch
 
     def _recv_requests(self):
         """Read from ZMQ socket until there is nothing left"""
@@ -97,32 +106,29 @@ class Scheduler:
                 raise ValueError(f"Invalid object: {recv_req}")
 
     def _handle_generate_request(self, recv_req: TokenizedGenerateRequest):
-        """Create ReqState for the request and add it to the queue."""
-        req_state = ReqState.init_new(
-            rid=recv_req.rid,
-            origin_input_ids=recv_req.input_ids,
-            sampling_params=recv_req.sampling_params,
-            eos_token_ids=self.model_config.hf_eos_token_id,
-            vocab_size=self.model_config.vocab_size,
-        )
-        # Mutation safe since this copy of sampling_params was deserialized with recv_req
-        req_state.sampling_params.max_new_tokens = min(
+        """Create ReqInfo for the request and add it to the queue."""
+        sampling_params = recv_req.sampling_params
+        sampling_params.max_new_tokens = min(
             (
-                req_state.sampling_params.max_new_tokens
-                if req_state.sampling_params.max_new_tokens is not None
+                sampling_params.max_new_tokens
+                if sampling_params.max_new_tokens is not None
                 else 1 << 30
             ),
-            self.max_req_len - len(req_state.origin_input_ids),
+            self.max_req_len - len(recv_req.input_ids),
         )
-        self.waiting_queue.append(req_state)
+        req_info = ReqInfo(
+            rid=recv_req.rid,
+            origin_input_ids=recv_req.input_ids,
+            sampling_params=sampling_params,
+            eos_token_ids=self.model_config.hf_eos_token_id,
+        )
+        self.waiting_queue.append(req_info)
 
     def _get_next_batch_to_run(self) -> ScheduleBatch | None:
         # Simplistic brute force logic to get something that works temporarily
         # Will have much more sophisticated logic once chunked prefill is implemented
 
         can_run_list = []
-        if self.cur_batch:
-            can_run_list = self.cur_batch.reqs
         for req in self.waiting_queue:
             if self.req_to_token_pool.available_size() <= 0:
                 break
@@ -137,50 +143,60 @@ class Scheduler:
 
         self.waiting_queue = [req for req in self.waiting_queue if req not in can_run_list]
 
-        if len(can_run_list) <= 0:
-            return None
-
-        batch = ScheduleBatch.init_new(
-            reqs=can_run_list,
-            req_to_token_pool=self.req_to_token_pool,
-            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            model_config=self.model_config,
-        )
-
-        batch.prepare()
-        return batch
+        # If we have an extend batch, run extend; mimics SGLang behavior which prioritizes prefill
+        if len(can_run_list) > 0:
+            new_extend_reqs = [NewReqState(req_info=req, prefix_len=0) for req in can_run_list]
+            return ScheduleBatch.prepare_for_extend(
+                reqs=new_extend_reqs,
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            )
+        # Else run decode
+        if self.running_decode_batch:
+            decode_batch = self.running_decode_batch
+            self.running_decode_batch = None
+            return decode_batch
+        return None
 
     def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
         return self.model_runner.forward_batch_generation(self.kv_cache, batch)
 
-    def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:
+    def _process_batch_result(
+        self, batch: ScheduleBatch, result: GenerationBatchResult
+    ) -> ScheduleBatch | None:
         """
         First, use the GenerationBatchResult to update batch.reqs.
         Then, use the updated batch.reqs to send BatchTokenIDOutput to the detokenizer.
         Finally, remove finished requests and free kv cache
         """
-        for req, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
-            req.output_ids.append(next_token_id)
-            req.check_finished()
+        reqs = [
+            ProcessedReqState.process_req(r, next_token_id)
+            for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True)
+        ]
 
-        self._stream_output(batch.reqs)
+        self._stream_output(reqs)
 
         # Free caches and filter batch
-        finished_reqs = [r for r in batch.reqs if r.finished_reason is not None]
+        finished_reqs = [r for r in reqs if r.finished_reason is not None]
+        unfinished_reqs = [r for r in reqs if r.finished_reason is None]
         req_pool_indices = []
         for req in finished_reqs:
-            assert req.req_pool_idx is not None
             self.token_to_kv_pool_allocator.free(
                 self.req_to_token_pool.read(
-                    req.req_pool_idx, len(req.origin_input_ids) + len(req.output_ids)
+                    req.req_pool_idx, len(req.req_info.origin_input_ids) + len(req.output_ids)
                 )
             )
             req_pool_indices.append(req.req_pool_idx)
         self.req_to_token_pool.free(req_pool_indices)
+        if len(unfinished_reqs) == 0:
+            return None
+        return ScheduleBatch.prepare_for_decode(
+            reqs=unfinished_reqs,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+        )
 
-        batch.reqs = [req for req in batch.reqs if req.finished_reason is None]
-
-    def _stream_output(self, reqs: list[ReqState]) -> None:
+    def _stream_output(self, reqs: list[ProcessedReqState]) -> None:
         # Constructs and sends the BatchTokenIDOutput from the requests
         rids = []
         finished_reasons = []
@@ -191,17 +207,17 @@ class Scheduler:
         cached_tokens = []
 
         for req in reqs:
-            rids.append(req.rid)
+            rids.append(req.req_info.rid)
             finished_reasons.append(req.finished_reason)
             # Also send prompt_ids on the first send
             # This provides necessary context for the detokenizer
             if req.send_token_offset == 0:
-                prompt_ids.append(req.origin_input_ids)
+                prompt_ids.append(req.req_info.origin_input_ids)
             else:
                 prompt_ids.append([])
             output_ids.append(req.output_ids[req.send_token_offset :])
             req.send_token_offset = len(req.output_ids)
-            prompt_tokens.append(len(req.origin_input_ids))
+            prompt_tokens.append(len(req.req_info.origin_input_ids))
             completion_tokens.append(len(req.output_ids))
             cached_tokens.append(0)
 

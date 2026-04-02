@@ -47,9 +47,8 @@ class ForwardBatch:
 
         # Gather request information together
         for req in batch.reqs:
-            assert req.req_pool_idx is not None
             # Slice ids and positions to only include the uncached portion
-            full_ids = req.origin_input_ids + req.output_ids
+            full_ids = req.req_info.origin_input_ids + req.output_ids
             full_positions = range(len(full_ids))
             req_ids = full_ids[-req.extend_len :]
             req_positions = full_positions[-req.extend_len :]
@@ -73,7 +72,6 @@ class ForwardBatch:
         jax_positions = jnp.array(positions + query_pad_len * [0])
         # Padding for out_cache_loc *MUST* be 0 since it the 0 page of the KV cache is specifically
         # reserved for junk padding token writes
-        assert batch.out_cache_loc is not None
         jax_out_cache_loc = jnp.array(list(batch.out_cache_loc) + query_pad_len * [0])
         jax_seq_lens = jnp.array(seq_lens + batch_pad_len * [0])
         jax_extend_lens = jnp.array(extend_lens + batch_pad_len * [0])
@@ -87,7 +85,7 @@ class ForwardBatch:
             positions=jax_positions,
             seq_lens=jax_seq_lens,
             req_pool_indices=jax_req_pool_indices,
-            req_to_token=jnp.array(batch.req_to_token_pool.req_to_token),
+            req_to_token=jnp.array(batch.req_to_token),
             extend_lens=jax_extend_lens,
             out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,

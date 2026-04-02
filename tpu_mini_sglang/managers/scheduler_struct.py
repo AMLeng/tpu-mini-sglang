@@ -1,65 +1,111 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import Self
 
 import numpy as np
 
 from tpu_mini_sglang.managers.io_struct import FinishReason
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
-from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 
 
-@dataclass(kw_only=True)
-class ReqState:
+@dataclass(frozen=True)
+class ReqInfo:
+    # Original SGLang uses a single Req class which is mutated in-place many times
+    # I found this hard to follow and refactored
+    # ReqInfo contains the immutable input state for a request
     rid: str
-
-    # inputs
     origin_input_ids: list[int]
     sampling_params: SamplingParams
     eos_token_ids: set[int]
-    vocab_size: int
+
+
+@dataclass
+class NewReqState:
+    # NewReqState has information for a request before it is scheduled for the first time
+    req_info: ReqInfo
 
     # kv cache state
-    req_pool_idx: int | None = None
-    prefix_len: int = 0
+    prefix_len: int
+
+
+@dataclass
+class PreparedReqState:
+    # PreparedReqState is a request in a ScheduleBatch that has been prepared for extend/decode
+    req_info: ReqInfo
+
+    # kv cache state
+    req_pool_idx: int
     extend_len: int
 
-    # outputs
+    # Output information
     output_ids: list[int] = field(default_factory=list)
-    finished_reason: FinishReason | None = None
     send_token_offset: int = 0
 
     @classmethod
-    def init_new(
+    def init_prefill_req(
         cls,
-        rid: str,
-        origin_input_ids: list[int],
-        sampling_params: SamplingParams,
-        eos_token_ids: set[int],
-        vocab_size: int,
-    ):
-        # Initialize as though no prefix was matched and we just extended 0
+        req: NewReqState,
+        req_pool_idx: int,
+    ) -> Self:
         return cls(
-            rid=rid,
-            origin_input_ids=origin_input_ids,
-            sampling_params=sampling_params,
-            eos_token_ids=eos_token_ids,
-            vocab_size=vocab_size,
-            extend_len=0,
+            req_info=req.req_info,
+            req_pool_idx=req_pool_idx,
+            extend_len=len(req.req_info.origin_input_ids) - req.prefix_len,
         )
 
-    def check_finished(self):
-        if self.finished_reason is not None:
-            return
+    @classmethod
+    def init_decode_req(
+        cls,
+        req: ProcessedReqState,
+    ) -> Self:
+        return cls(
+            req_info=req.req_info,
+            req_pool_idx=req.req_pool_idx,
+            extend_len=1,  # Decode always extends by one
+            output_ids=req.output_ids,
+            send_token_offset=req.send_token_offset,
+        )
+
+
+@dataclass
+class ProcessedReqState:
+    # ProcessedReqState is the result of a request after running through the model
+    req_info: ReqInfo
+
+    # kv cache state
+    req_pool_idx: int
+
+    output_ids: list[int]
+    send_token_offset: int
+    finished_reason: FinishReason | None
+
+    @classmethod
+    def process_req(cls, req: PreparedReqState, new_token: int) -> Self:
+        # We mutate the prepared req here, but this is fine since we should never touch it again
+        req.output_ids.append(new_token)
+        obj = cls(
+            req_info=req.req_info,
+            req_pool_idx=req.req_pool_idx,
+            output_ids=req.output_ids,
+            send_token_offset=req.send_token_offset,
+            finished_reason=None,
+        )
+        info = obj.req_info
+
+        # Set finished reason if applicable
         if (
-            self.sampling_params.max_new_tokens
-            and len(self.output_ids) >= self.sampling_params.max_new_tokens
+            info.sampling_params.max_new_tokens
+            and len(obj.output_ids) >= info.sampling_params.max_new_tokens
         ):
-            self.finished_reason = "length"
-            return
-        if not self.sampling_params.ignore_eos and self.output_ids[-1] in self.eos_token_ids:
-            self.finished_reason = "stop"
-            return
+            obj.finished_reason = "length"
+            return obj
+        if not info.sampling_params.ignore_eos and obj.output_ids[-1] in info.eos_token_ids:
+            obj.finished_reason = "stop"
+            return obj
+        return obj
 
 
 @dataclass
@@ -67,61 +113,96 @@ class ScheduleBatch:
     # Unlike original SGLang, we enforce that ScheduleBatch is entirely CPU-side
     # Any structures needed on the TPU are constructed/copied over later,
     # when we construct the ForwardBatch from the ScheduleBatch
-    reqs: list[ReqState]
-    req_to_token_pool: ReqToTokenPool
-    token_to_kv_pool_allocator: TokenToKVPoolAllocator
-    model_config: ModelConfig
-    out_cache_loc: np.ndarray | None
+    # We now merge the prepare logic into ScheduleBatch, so that a ScheduleBatch is always
+    # fully prepared to run and only stale for a brief moment immediately after running
+    reqs: list[PreparedReqState]
+    out_cache_loc: np.ndarray
+
+    # Should always be the same reference; this is just a convenient way to pass it to ForwardBatch
+    req_to_token: np.ndarray
 
     @classmethod
-    def init_new(
+    def prepare_for_extend(
         cls,
-        reqs: list[ReqState],
+        reqs: list[NewReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
-        model_config: ModelConfig,
-    ):
-        return cls(
-            reqs=reqs,
-            req_to_token_pool=req_to_token_pool,
-            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
-            model_config=model_config,
-            out_cache_loc=None,
-        )
+    ) -> Self:
+        # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
 
-    # Function for mixed extend/decode
-    def prepare(self):
-        need_req_slot = [r for r in self.reqs if r.req_pool_idx is None]
-        req_pool_indices = self.req_to_token_pool.alloc(len(need_req_slot))
+        req_pool_indices = req_to_token_pool.alloc(len(reqs))
         if req_pool_indices is None:
             raise RuntimeError("Ran out of running request slots.")
-        for req, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True):
-            req.req_pool_idx = req_pool_idx
 
-        for req in self.reqs:
-            req.prefix_len += req.extend_len
-            req.extend_len = len(req.origin_input_ids) + len(req.output_ids) - req.prefix_len
-        total_extend_len = sum([r.extend_len for r in self.reqs])
+        prepared_reqs = [
+            PreparedReqState.init_prefill_req(r, req_pool_idx)
+            for r, req_pool_idx in zip(reqs, req_pool_indices, strict=True)
+        ]
+
+        total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
         # Allocate actual cache
-        self.out_cache_loc = self.token_to_kv_pool_allocator.alloc(total_extend_len)
-        if self.out_cache_loc is None:
+        out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+        if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")
 
         # Update req_to_token_pool information
         pt = 0
-        for i, req in enumerate(self.reqs):
+        for i, req in enumerate(prepared_reqs):
             # We use pt to step through out_cache_loc
             # Since out_cache_loc is a flattened list of length total_extend_len
-            assert req.req_pool_idx is not None
-            self.req_to_token_pool.write(
+            # We use the index i to reach back into the NewReqState to get the prefix_len
+            req_to_token_pool.write(
                 (
                     req.req_pool_idx,
-                    slice(req.prefix_len, req.prefix_len + req.extend_len),
+                    slice(reqs[i].prefix_len, reqs[i].prefix_len + req.extend_len),
                 ),
-                self.out_cache_loc[pt : pt + req.extend_len],
+                out_cache_loc[pt : pt + req.extend_len],
             )
             pt += req.extend_len
+
+        return cls(
+            reqs=prepared_reqs,
+            out_cache_loc=out_cache_loc,
+            req_to_token=req_to_token_pool.req_to_token,
+        )
+
+    @classmethod
+    def prepare_for_decode(
+        cls,
+        reqs: list[ProcessedReqState],
+        req_to_token_pool: ReqToTokenPool,
+        token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+    ) -> Self:
+        prepared_reqs = [PreparedReqState.init_decode_req(r) for r in reqs]
+        total_extend_len = sum(r.extend_len for r in prepared_reqs)
+
+        # Allocate actual cache
+        out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+        if out_cache_loc is None:
+            raise RuntimeError("Ran out of kv cache slots.")
+
+        req_pool_indices = np.asarray([r.req_pool_idx for r in prepared_reqs])
+        seq_lens = np.asarray(
+            [len(r.req_info.origin_input_ids) + len(r.output_ids) for r in prepared_reqs]
+        )
+
+        # Update req_to_token_pool information
+        req_to_token_pool.write(
+            (req_pool_indices, seq_lens - 1),
+            out_cache_loc,
+        )
+
+        return cls(
+            reqs=prepared_reqs,
+            out_cache_loc=out_cache_loc,
+            req_to_token=req_to_token_pool.req_to_token,
+        )
+
+    def merge_batch(self, other: ScheduleBatch):
+        self.reqs.extend(other.reqs)
+        # Safe since both batches are prepared/have kv cache slots allocated on construction
+        self.out_cache_loc = np.concatenate([self.out_cache_loc, other.out_cache_loc])
 
 
 @dataclass
