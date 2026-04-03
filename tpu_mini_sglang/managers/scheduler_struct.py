@@ -29,7 +29,7 @@ class PrefillReqState:
 
     # kv cache state
     prefix_len: int
-    extend_len: int
+    extend_len: int  # Number of new tokens we will extend the kv cache by
 
     prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
     req_pool_idx: int | None = None  # Should be none except for at most one previously chunked req
@@ -37,7 +37,7 @@ class PrefillReqState:
 
 @dataclass
 class PreparedReqState:
-    # PreparedReqState is a request in a ScheduleBatch that has been prepared for extend/decode
+    # PreparedReqState is a request in a ScheduleBatch that has been prepared for prefill/decode
     req_info: ReqInfo
 
     # kv cache state
@@ -146,7 +146,7 @@ class ScheduleBatch:
     req_to_token: np.ndarray
 
     @classmethod
-    def prepare_for_extend(
+    def prepare_for_prefill(
         cls,
         reqs: list[PrefillReqState],
         req_to_token_pool: ReqToTokenPool,

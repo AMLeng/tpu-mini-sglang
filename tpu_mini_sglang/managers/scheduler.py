@@ -148,9 +148,9 @@ class Scheduler:
 
         self.waiting_queue = adder.filter_runnable_reqs(self.waiting_queue)
 
-        # If we have an extend batch, run extend; mimics SGLang behavior which prioritizes prefill
+        # Mimic SGLang behavior and run prefill if we have a prefill batch
         if len(adder.can_run_list) > 0:
-            return ScheduleBatch.prepare_for_extend(
+            return ScheduleBatch.prepare_for_prefill(
                 reqs=adder.can_run_list,
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
