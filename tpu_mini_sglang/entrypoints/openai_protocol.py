@@ -94,8 +94,10 @@ def convert_chat_completion_to_internal_request(
     req: ChatCompletionRequest, raw_request: Request
 ) -> GenerateRequest:
     # The raw_request is necessary to access the tokenizer_manager from app.state
+
+    max_new_tokens = req.max_completion_tokens if req.max_completion_tokens is not None else 1 << 30
     sampling_params = SamplingParams(
-        max_new_tokens=req.max_completion_tokens,
+        max_new_tokens=max_new_tokens,
         temperature=req.temperature,
         top_p=req.top_p,
         frequency_penalty=req.frequency_penalty,

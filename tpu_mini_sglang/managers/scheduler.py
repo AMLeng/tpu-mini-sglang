@@ -10,9 +10,13 @@ from tpu_mini_sglang.managers.io_struct import (
     BatchTokenIDOutput,
     TokenizedGenerateRequest,
 )
+from tpu_mini_sglang.managers.schedule_policy import (
+    AddReqResult,
+    PrefillAdder,
+)
 from tpu_mini_sglang.managers.scheduler_struct import (
     GenerationBatchResult,
-    NewReqState,
+    PreparedReqState,
     ProcessedReqState,
     ReqInfo,
     ScheduleBatch,
@@ -47,6 +51,7 @@ class Scheduler:
         # Init running state
         self.waiting_queue: list[ReqInfo] = []
         self.running_decode_batch: ScheduleBatch | None = None
+        self.chunked_req: PreparedReqState | None = None
 
         # Init model runner
         self.mesh = create_device_mesh(
@@ -58,9 +63,10 @@ class Scheduler:
         )
 
         # Init KV Cache
+        assert self.server_args.page_size == 1  # We have not yet implemented other page sizes
         self._init_memory_pool(
             max_kv_tokens=self.model_runner.get_max_kv_tokens(self.model_config.dtype),
-            page_size=1,
+            page_size=self.server_args.page_size,
             kv_cache_dtype=self.model_config.dtype,
         )
 
@@ -107,13 +113,11 @@ class Scheduler:
 
     def _handle_generate_request(self, recv_req: TokenizedGenerateRequest):
         """Create ReqInfo for the request and add it to the queue."""
+        # If the user didn't provide max_new_tokens, it is initialized to a massive default
+        # We clamp it here, since the scheduler is the source of truth for max_req_len
         sampling_params = recv_req.sampling_params
         sampling_params.max_new_tokens = min(
-            (
-                sampling_params.max_new_tokens
-                if sampling_params.max_new_tokens is not None
-                else 1 << 30
-            ),
+            sampling_params.max_new_tokens,
             self.max_req_len - len(recv_req.input_ids),
         )
         req_info = ReqInfo(
@@ -125,29 +129,29 @@ class Scheduler:
         self.waiting_queue.append(req_info)
 
     def _get_next_batch_to_run(self) -> ScheduleBatch | None:
-        # Simplistic brute force logic to get something that works temporarily
-        # Will have much more sophisticated logic once chunked prefill is implemented
+        adder = PrefillAdder(
+            page_size=self.server_args.page_size,
+            available_kv_tokens=self.token_to_kv_pool_allocator.available_size(),
+            running_decode_batch=self.running_decode_batch,
+            prefill_token_budget=self.server_args.max_num_batched_tokens,
+            available_req_slots=self.req_to_token_pool.available_size(),
+        )
 
-        can_run_list = []
+        if self.chunked_req is not None:
+            # Will only return here if we cannot make any progress on the chunked req right now
+            self.chunked_req = adder.try_add_chunked_req(self.chunked_req)
+
         for req in self.waiting_queue:
-            if self.req_to_token_pool.available_size() <= 0:
+            res = adder.try_add_one_req(req)
+            if res != AddReqResult.CONTINUE:
                 break
 
-            # Requests from the waiting queue will have nothing in the KV cache
-            # We could use more intelligent logic here
-            # For now we use the conservative strategy to avoid dealing with cache evictions
-            expected_tokens = req.sampling_params.max_new_tokens
-            if self.token_to_kv_pool_allocator.available_size() < expected_tokens:
-                continue
-            can_run_list.append(req)
-
-        self.waiting_queue = [req for req in self.waiting_queue if req not in can_run_list]
+        self.waiting_queue = adder.filter_runnable_reqs(self.waiting_queue)
 
         # If we have an extend batch, run extend; mimics SGLang behavior which prioritizes prefill
-        if len(can_run_list) > 0:
-            new_extend_reqs = [NewReqState(req_info=req, prefix_len=0) for req in can_run_list]
+        if len(adder.can_run_list) > 0:
             return ScheduleBatch.prepare_for_extend(
-                reqs=new_extend_reqs,
+                reqs=adder.can_run_list,
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             )
@@ -169,14 +173,24 @@ class Scheduler:
         Then, use the updated batch.reqs to send BatchTokenIDOutput to the detokenizer.
         Finally, remove finished requests and free kv cache
         """
+
+        # Pull out and save the chunked req if present
+        chunked_reqs = [r for r in batch.reqs if r.prefill_unfinished]
+        assert len(chunked_reqs) + int(self.chunked_req is not None) <= 1
+        if len(chunked_reqs) == 1:
+            self.chunked_req = chunked_reqs[0]
+
+        # Then begin processing all non-chunked reqs
+        # Past this point, we should not reference batch any more
         reqs = [
             ProcessedReqState.process_req(r, next_token_id)
             for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True)
+            if not r.prefill_unfinished
         ]
 
         self._stream_output(reqs)
 
-        # Free caches and filter batch
+        # Free caches for finished reqs and return a decode batch of unfinished reqs
         finished_reqs = [r for r in reqs if r.finished_reason is not None]
         unfinished_reqs = [r for r in reqs if r.finished_reason is None]
         req_pool_indices = []

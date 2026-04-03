@@ -4,7 +4,7 @@ TOP_K_ALL = 1 << 30  # Larger than any vocab size
 
 
 class SamplingParams(BaseModel):
-    max_new_tokens: int | None = None
+    max_new_tokens: int = 1 << 30  # Effectively unlimited default, clamped by the scheduler
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1

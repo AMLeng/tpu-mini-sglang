@@ -23,12 +23,16 @@ class ReqInfo:
 
 
 @dataclass
-class NewReqState:
-    # NewReqState has information for a request before it is scheduled for the first time
+class PrefillReqState:
+    # PrefillReqState has information for a prefill request after KV cache prefix matching
     req_info: ReqInfo
 
     # kv cache state
     prefix_len: int
+    extend_len: int
+
+    prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
+    req_pool_idx: int | None = None  # Should be none except for at most one previously chunked req
 
 
 @dataclass
@@ -40,6 +44,9 @@ class PreparedReqState:
     req_pool_idx: int
     extend_len: int
 
+    prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
+    chunked_prefix_len: int = 0  # Temp field to deal with the fact that we don't prefix match
+
     # Output information
     output_ids: list[int] = field(default_factory=list)
     send_token_offset: int = 0
@@ -47,13 +54,29 @@ class PreparedReqState:
     @classmethod
     def init_prefill_req(
         cls,
-        req: NewReqState,
+        req: PrefillReqState,
         req_pool_idx: int,
     ) -> Self:
         return cls(
             req_info=req.req_info,
             req_pool_idx=req_pool_idx,
-            extend_len=len(req.req_info.origin_input_ids) - req.prefix_len,
+            extend_len=req.extend_len,
+            prefill_unfinished=req.prefill_unfinished,
+            chunked_prefix_len=req.prefix_len,
+        )
+
+    @classmethod
+    def init_prefill_req_from_chunked(
+        cls,
+        req: PrefillReqState,
+    ) -> Self:
+        assert req.req_pool_idx is not None
+        return cls(
+            req_info=req.req_info,
+            req_pool_idx=req.req_pool_idx,
+            extend_len=req.extend_len,
+            prefill_unfinished=req.prefill_unfinished,
+            chunked_prefix_len=req.prefix_len,
         )
 
     @classmethod
@@ -65,6 +88,7 @@ class PreparedReqState:
             req_info=req.req_info,
             req_pool_idx=req.req_pool_idx,
             extend_len=1,  # Decode always extends by one
+            prefill_unfinished=False,
             output_ids=req.output_ids,
             send_token_offset=req.send_token_offset,
         )
@@ -124,20 +148,29 @@ class ScheduleBatch:
     @classmethod
     def prepare_for_extend(
         cls,
-        reqs: list[NewReqState],
+        reqs: list[PrefillReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
     ) -> Self:
         # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
 
-        req_pool_indices = req_to_token_pool.alloc(len(reqs))
+        # Only chunked reqs should have a req_pool_idx assigned
+        chunked_reqs = [r for r in reqs if r.req_pool_idx is not None]
+
+        need_req_slot = [r for r in reqs if r.req_pool_idx is None]
+        req_pool_indices = req_to_token_pool.alloc(len(need_req_slot))
         if req_pool_indices is None:
             raise RuntimeError("Ran out of running request slots.")
 
         prepared_reqs = [
             PreparedReqState.init_prefill_req(r, req_pool_idx)
-            for r, req_pool_idx in zip(reqs, req_pool_indices, strict=True)
+            for r, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True)
         ]
+        prepared_reqs.extend(
+            [PreparedReqState.init_prefill_req_from_chunked(req) for req in chunked_reqs]
+        )
+        # Created in parallel to prepared_reqs
+        prefix_lens = [r.prefix_len for r in need_req_slot] + [r.prefix_len for r in chunked_reqs]
 
         total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
@@ -148,14 +181,13 @@ class ScheduleBatch:
 
         # Update req_to_token_pool information
         pt = 0
-        for i, req in enumerate(prepared_reqs):
+        for prefix_len, req in zip(prefix_lens, prepared_reqs, strict=True):
             # We use pt to step through out_cache_loc
             # Since out_cache_loc is a flattened list of length total_extend_len
-            # We use the index i to reach back into the NewReqState to get the prefix_len
             req_to_token_pool.write(
                 (
                     req.req_pool_idx,
-                    slice(reqs[i].prefix_len, reqs[i].prefix_len + req.extend_len),
+                    slice(prefix_len, prefix_len + req.extend_len),
                 ),
                 out_cache_loc[pt : pt + req.extend_len],
             )

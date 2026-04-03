@@ -12,6 +12,7 @@ class ServerArgs:
     model_path: str
 
     # Sharding
+
     tp: int = 1  # Degree of tensor parallelism
     dp: int = 1  # Degree of data parallelism
 
@@ -24,6 +25,11 @@ class ServerArgs:
     # Logging
 
     log_level: str = "info"  # The logging level of all loggers.
+
+    # Scheduling
+
+    page_size: int = 1
+    max_num_batched_tokens: int = 8192
 
     @classmethod
     def from_cli(cls) -> Self:
