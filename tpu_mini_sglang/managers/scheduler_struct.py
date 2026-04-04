@@ -8,6 +8,7 @@ import numpy as np
 from tpu_mini_sglang.managers.io_struct import FinishReason
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
+from tpu_mini_sglang.mem_cache.radix_cache import RadixCache, TreeNode
 from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 
 
@@ -28,8 +29,11 @@ class PrefillReqState:
     req_info: ReqInfo
 
     # kv cache state
-    prefix_len: int
     extend_len: int  # Number of new tokens we will extend the kv cache by
+    prefix_indices: np.ndarray
+    last_node: TreeNode
+    # Our tree_matched_len corresponds directly to SGLang's cache_protected_len
+    tree_matched_len: int  # In sync with last_node; number of tokens matched in the RadixCache
 
     prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
     req_pool_idx: int | None = None  # Should be none except for at most one previously chunked req
@@ -43,9 +47,10 @@ class PreparedReqState:
     # kv cache state
     req_pool_idx: int
     extend_len: int
+    last_node: TreeNode
+    tree_matched_len: int
 
     prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
-    chunked_prefix_len: int = 0  # Temp field to deal with the fact that we don't prefix match
 
     # Output information
     output_ids: list[int] = field(default_factory=list)
@@ -61,8 +66,9 @@ class PreparedReqState:
             req_info=req.req_info,
             req_pool_idx=req_pool_idx,
             extend_len=req.extend_len,
+            last_node=req.last_node,
+            tree_matched_len=req.tree_matched_len,
             prefill_unfinished=req.prefill_unfinished,
-            chunked_prefix_len=req.prefix_len,
         )
 
     @classmethod
@@ -75,8 +81,9 @@ class PreparedReqState:
             req_info=req.req_info,
             req_pool_idx=req.req_pool_idx,
             extend_len=req.extend_len,
+            last_node=req.last_node,
+            tree_matched_len=req.tree_matched_len,
             prefill_unfinished=req.prefill_unfinished,
-            chunked_prefix_len=req.prefix_len,
         )
 
     @classmethod
@@ -88,6 +95,8 @@ class PreparedReqState:
             req_info=req.req_info,
             req_pool_idx=req.req_pool_idx,
             extend_len=1,  # Decode always extends by one
+            last_node=req.last_node,
+            tree_matched_len=req.tree_matched_len,
             prefill_unfinished=False,
             output_ids=req.output_ids,
             send_token_offset=req.send_token_offset,
@@ -101,6 +110,8 @@ class ProcessedReqState:
 
     # kv cache state
     req_pool_idx: int
+    last_node: TreeNode
+    tree_matched_len: int
 
     output_ids: list[int]
     send_token_offset: int
@@ -114,6 +125,8 @@ class ProcessedReqState:
             req_info=req.req_info,
             req_pool_idx=req.req_pool_idx,
             output_ids=req.output_ids,
+            last_node=req.last_node,
+            tree_matched_len=req.tree_matched_len,
             send_token_offset=req.send_token_offset,
             finished_reason=None,
         )
@@ -151,6 +164,7 @@ class ScheduleBatch:
         reqs: list[PrefillReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+        tree_cache: RadixCache,
     ) -> Self:
         # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
 
@@ -165,25 +179,34 @@ class ScheduleBatch:
         prepared_reqs = [
             PreparedReqState.init_prefill_req(r, req_pool_idx)
             for r, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True)
-        ]
-        prepared_reqs.extend(
-            [PreparedReqState.init_prefill_req_from_chunked(req) for req in chunked_reqs]
-        )
+        ] + [PreparedReqState.init_prefill_req_from_chunked(req) for req in chunked_reqs]
         # Created in parallel to prepared_reqs
-        prefix_lens = [r.prefix_len for r in need_req_slot] + [r.prefix_len for r in chunked_reqs]
+        prefill_reqs = need_req_slot + chunked_reqs
 
         total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
         # Allocate actual cache
+        tree_cache.ensure_free_size(total_extend_len)
         out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
         if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")
 
         # Update req_to_token_pool information
         pt = 0
-        for prefix_len, req in zip(prefix_lens, prepared_reqs, strict=True):
+        for prefill_req, req in zip(prefill_reqs, prepared_reqs, strict=True):
             # We use pt to step through out_cache_loc
             # Since out_cache_loc is a flattened list of length total_extend_len
+            prefix_indices = prefill_req.prefix_indices
+            prefix_len = len(prefix_indices)
+            # Chunked requests already had their prefix indices written previously
+            if prefill_req.req_pool_idx is None:
+                req_to_token_pool.write(
+                    (
+                        req.req_pool_idx,
+                        slice(0, len(prefix_indices)),
+                    ),
+                    prefix_indices,
+                )
             req_to_token_pool.write(
                 (
                     req.req_pool_idx,
@@ -205,11 +228,13 @@ class ScheduleBatch:
         reqs: list[ProcessedReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+        tree_cache: RadixCache,
     ) -> Self:
         prepared_reqs = [PreparedReqState.init_decode_req(r) for r in reqs]
         total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
         # Allocate actual cache
+        tree_cache.ensure_free_size(total_extend_len)
         out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
         if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")

@@ -16,13 +16,14 @@ from tpu_mini_sglang.managers.schedule_policy import (
 )
 from tpu_mini_sglang.managers.scheduler_struct import (
     GenerationBatchResult,
-    PreparedReqState,
+    PrefillReqState,
     ProcessedReqState,
     ReqInfo,
     ScheduleBatch,
 )
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
+from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
@@ -51,7 +52,7 @@ class Scheduler:
         # Init running state
         self.waiting_queue: list[ReqInfo] = []
         self.running_decode_batch: ScheduleBatch | None = None
-        self.chunked_req: PreparedReqState | None = None
+        self.chunked_req: PrefillReqState | None = None
 
         # Init model runner
         self.mesh = create_device_mesh(
@@ -63,8 +64,8 @@ class Scheduler:
         )
 
         # Init KV Cache
-        assert self.server_args.page_size == 1  # We have not yet implemented other page sizes
-        self._init_memory_pool(
+        assert self.server_args.page_size == 1  # The allocator cannot handle other page sizes yet
+        self._init_memory_pool_and_cache(
             max_kv_tokens=self.model_runner.get_max_kv_tokens(self.model_config.dtype),
             page_size=self.server_args.page_size,
             kv_cache_dtype=self.model_config.dtype,
@@ -131,6 +132,7 @@ class Scheduler:
     def _get_next_batch_to_run(self) -> ScheduleBatch | None:
         adder = PrefillAdder(
             page_size=self.server_args.page_size,
+            tree_cache=self.tree_cache,
             available_kv_tokens=self.token_to_kv_pool_allocator.available_size(),
             running_decode_batch=self.running_decode_batch,
             prefill_token_budget=self.server_args.max_num_batched_tokens,
@@ -154,6 +156,7 @@ class Scheduler:
                 reqs=adder.can_run_list,
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                tree_cache=self.tree_cache,
             )
         # Else run decode
         if self.running_decode_batch:
@@ -178,7 +181,7 @@ class Scheduler:
         chunked_reqs = [r for r in batch.reqs if r.prefill_unfinished]
         assert len(chunked_reqs) + int(self.chunked_req is not None) <= 1
         if len(chunked_reqs) == 1:
-            self.chunked_req = chunked_reqs[0]
+            self.chunked_req = self.tree_cache.cache_chunked_req(chunked_reqs[0])
 
         # Then begin processing all non-chunked reqs
         # Past this point, we should not reference batch any more
@@ -190,24 +193,24 @@ class Scheduler:
 
         self._stream_output(reqs)
 
-        # Free caches for finished reqs and return a decode batch of unfinished reqs
+        # Update caches
         finished_reqs = [r for r in reqs if r.finished_reason is not None]
         unfinished_reqs = [r for r in reqs if r.finished_reason is None]
         req_pool_indices = []
         for req in finished_reqs:
-            self.token_to_kv_pool_allocator.free(
-                self.req_to_token_pool.read(
-                    req.req_pool_idx, len(req.req_info.origin_input_ids) + len(req.output_ids)
-                )
-            )
+            self.tree_cache.cache_finished_req(req)
             req_pool_indices.append(req.req_pool_idx)
-        self.req_to_token_pool.free(req_pool_indices)
+        self.req_to_token_pool.free(req_pool_indices)  # Must happen after we cache reqs
+        for req in unfinished_reqs:
+            self.tree_cache.cache_unfinished_req(req)
+
         if len(unfinished_reqs) == 0:
             return None
         return ScheduleBatch.prepare_for_decode(
             reqs=unfinished_reqs,
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            tree_cache=self.tree_cache,
         )
 
     def _stream_output(self, reqs: list[ProcessedReqState]) -> None:
@@ -246,7 +249,7 @@ class Scheduler:
         )
         self.send_to_detokenizer.send_pyobj(output)
 
-    def _init_memory_pool(
+    def _init_memory_pool_and_cache(
         self,
         max_kv_tokens: int,
         page_size: int,
@@ -275,6 +278,12 @@ class Scheduler:
             head_dim=self.model_config.head_dim,
             mesh=self.mesh,
             dtype=kv_cache_dtype,
+        )
+
+        self.tree_cache = RadixCache(
+            page_size=page_size,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
         )
 
 
