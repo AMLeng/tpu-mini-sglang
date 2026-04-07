@@ -9,11 +9,13 @@ dependencies = [
   "fastapi>=0.110",
   "flax",
   "jax",
+  "jinja2",  # Required for chat template application
   "orjson>=3.11",
   "psutil",
   "pyzmq>=25.1.2",
   "requests",
   "safetensors",
+  "sentencepiece",  # Required for some tokenizer paths
   "simple-parsing>=0.1.8",
   "tokenizers>=0.21.1",
   "transformers>=4.57.1,<5",
