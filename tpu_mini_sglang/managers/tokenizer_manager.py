@@ -69,6 +69,24 @@ class TokenizerManager:
         self.event_loop: asyncio.AbstractEventLoop | None = None
         self.asyncio_tasks: set[asyncio.Task] = set()  # References to prevent garbage collection
 
+    async def generate_request(self, req: GenerateRequest) -> ResponseDict:
+        # Attach our handler loop to the main event loop the first time we process a request
+        # This will allow us to receive the result from the detokenizer
+        self.ensure_event_loop()
+
+        # Tokenize the request text if not already tokenized
+        tokenized_req = self._tokenize_one_request(req)
+
+        # Send request to scheduler
+        state = self._send_one_request(tokenized_req)
+
+        # Await the scheduler responses and return only the last one
+        last_response: ResponseDict | None = None
+        async for response_dict in self._wait_one_response(req, state):
+            last_response = response_dict
+        assert last_response is not None
+        return last_response
+
     async def generate_request_stream(self, req: GenerateRequest) -> AsyncIterator[ResponseDict]:
         # Attach our handler loop to the main event loop the first time we process a request
         # This will allow us to receive the result from the detokenizer
@@ -90,7 +108,10 @@ class TokenizerManager:
         else:
             input_ids = self.tokenizer(obj.text)["input_ids"]
         return TokenizedGenerateRequest(
-            rid=obj.rid, input_ids=input_ids, sampling_params=obj.sampling_params
+            rid=obj.rid,
+            input_ids=input_ids,
+            sampling_params=obj.sampling_params,
+            stream=obj.stream,
         )
 
     def _send_one_request(self, tokenized_req: TokenizedGenerateRequest) -> ReqState:
@@ -142,6 +163,7 @@ class TokenizerManager:
                 raise ValueError(f"Invalid object: {recv_obj}")
 
     def _handle_batch_output(self, recv_obj: BatchStrOutput):
+        # Sets state.latest_out with a ResponseDict of cumulative info
         for i, rid in enumerate(recv_obj.rids):
             state = self.rid_to_state.get(rid, None)
             if state is None:
@@ -160,8 +182,9 @@ class TokenizerManager:
 
             state.output_ids.extend(recv_obj.output_ids[i])
 
+            # Make a copy of output_ids to avoid aliasing issues
             out_dict = ResponseDict(
-                text=state.text, output_ids=recv_obj.output_ids[i], meta_info=meta_info
+                text=state.text, output_ids=list(state.output_ids), meta_info=meta_info
             )
 
             state.finished = recv_obj.finished_reasons[i] is not None

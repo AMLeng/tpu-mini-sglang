@@ -21,6 +21,7 @@ class ReqInfo:
     origin_input_ids: list[int]
     sampling_params: SamplingParams
     eos_token_ids: set[int]
+    stream: bool
 
 
 @dataclass

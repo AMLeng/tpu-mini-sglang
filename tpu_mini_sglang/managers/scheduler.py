@@ -32,6 +32,8 @@ from tpu_mini_sglang.utils import configure_logger, get_exception_traceback, get
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FORCE_STREAM_INTERVAL = 50
+
 
 class Scheduler:
     def __init__(self, server_args: ServerArgs, port_args: PortArgs):
@@ -126,6 +128,7 @@ class Scheduler:
             origin_input_ids=recv_req.input_ids,
             sampling_params=sampling_params,
             eos_token_ids=self.model_config.hf_eos_token_id,
+            stream=recv_req.stream,
         )
         self.waiting_queue.append(req_info)
 
@@ -224,6 +227,13 @@ class Scheduler:
         cached_tokens = []
 
         for req in reqs:
+            if (
+                not req.req_info.stream
+                and len(req.output_ids) % DEFAULT_FORCE_STREAM_INTERVAL != 0
+                and req.finished_reason is None
+            ):
+                # For unfinished nonstreaming requests, only stream the output occasionally
+                continue
             rids.append(req.req_info.rid)
             finished_reasons.append(req.finished_reason)
             # Also send prompt_ids on the first send

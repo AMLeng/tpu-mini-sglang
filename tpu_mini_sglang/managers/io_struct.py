@@ -15,6 +15,7 @@ class GenerateRequest(BaseModel):
     text: str | None = None
     input_ids: list[int] | None = None
     sampling_params: SamplingParams = Field(default_factory=SamplingParams)
+    stream: bool = False
 
     @model_validator(mode="after")
     def normalize_input(self):
@@ -33,6 +34,7 @@ class TokenizedGenerateRequest:
     rid: str
     input_ids: list[int]
     sampling_params: SamplingParams
+    stream: bool
 
 
 @dataclass

@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel, Field
 
-from tpu_mini_sglang.managers.io_struct import GenerateRequest
+from tpu_mini_sglang.managers.io_struct import GenerateRequest, ResponseDict
 from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 
 ############## Pydantic Models ##############
@@ -31,6 +31,12 @@ ChatCompletionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletio
 # https://developers.openai.com/api/reference/resources/chat#(resource)%20chat.completions%20%3E%20(model)%20chat_completion_message_param%20%3E%20(schema)
 
 
+class CompletionUsage(BaseModel):
+    completion_tokens: int
+    prompt_tokens: int
+    total_tokens: int
+
+
 class ChatCompletionRequest(BaseModel):
     # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
     # We only include fields that are actually used downstream
@@ -40,8 +46,34 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: dict[str, float] | None = None
     max_completion_tokens: int | None = None
     presence_penalty: float = 0.0
+    stream: bool = False
     temperature: float = 0.7
     top_p: float = 1.0
+
+
+class ChatCompletionMessage(BaseModel):
+    content: str | None = None
+    refusal: str | None = None
+    role: Literal["assistant"] = "assistant"
+
+
+class ChatCompletionResponseChoice(BaseModel):
+    message: ChatCompletionMessage
+    finish_reason: Literal["stop", "length", "abort"] | None
+    index: int
+    # logprobs: None
+
+
+class ChatCompletion(BaseModel):
+    # https://github.com/openai/openai-python/blob/main/src/openai/types/chat/chat_completion.py
+    id: str
+    choices: list[ChatCompletionResponseChoice]
+    created: int
+    model: str
+    object: Literal["chat.completion"] = "chat.completion"
+    # service_tier: None
+    # system_fingerprint: None
+    usage: CompletionUsage | None = None
 
 
 class ChoiceDelta(BaseModel):
@@ -110,11 +142,38 @@ def convert_chat_completion_to_internal_request(
             req.messages, tokenize=True, add_generation_prompt=True
         )
     )
-    return GenerateRequest(input_ids=tokenized_templated_input, sampling_params=sampling_params)
+    return GenerateRequest(
+        input_ids=tokenized_templated_input, sampling_params=sampling_params, stream=req.stream
+    )
+
+
+def oai_format_response(response: ResponseDict, model_name: str) -> ChatCompletion:
+    rid = response["meta_info"]["id"]
+    message = ChatCompletionMessage(
+        content=response["text"],
+    )
+    choice = ChatCompletionResponseChoice(
+        message=message,
+        finish_reason=response["meta_info"]["finish_reason"],
+        index=0,  # We do not support parallel sampling; the index is always 0
+    )
+    completion_tokens = response["meta_info"]["completion_tokens"]
+    prompt_tokens = response["meta_info"]["prompt_tokens"]
+    return ChatCompletion(
+        id=rid,
+        choices=[choice],
+        created=int(time.time()),
+        model=model_name,
+        usage=CompletionUsage(
+            completion_tokens=completion_tokens,
+            prompt_tokens=prompt_tokens,
+            total_tokens=completion_tokens + prompt_tokens,
+        ),
+    )
 
 
 async def oai_format_response_stream(
-    response_stream: AsyncIterator[dict], model_name: str
+    response_stream: AsyncIterator[ResponseDict], model_name: str
 ) -> AsyncIterator[str]:
     is_first = True
     finish_reason_type = None

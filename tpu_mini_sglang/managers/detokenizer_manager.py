@@ -62,6 +62,8 @@ class DetokenizerManager:
             self.send_to_tokenizer.send_pyobj(output)
 
     def _handle_batch_token_id_output(self, recv_obj: BatchTokenIDOutput) -> BatchStrOutput:
+        # output_strs and output_ids are incremental deltas
+        # other fields are cumulative snapshots
         output_strs = self._decode_batch_token_id_output(recv_obj)
         return BatchStrOutput(
             rids=recv_obj.rids,
