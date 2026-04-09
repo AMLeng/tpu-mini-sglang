@@ -1,8 +1,7 @@
 import dataclasses
 import tempfile
-from typing import Self
 
-import simple_parsing
+from simple_parsing import ArgumentParser, DashVariant
 
 
 @dataclasses.dataclass
@@ -32,10 +31,10 @@ class ServerArgs:
     max_num_batched_tokens: int = 8192
 
     @classmethod
-    def from_cli(cls) -> Self:
-        parser = simple_parsing.ArgumentParser()
-        parser.add_arguments(cls, dest="cfg")
-        return parser.parse_args().cfg
+    def build_parser(cls, dest: str = "cfg") -> ArgumentParser:
+        parser = ArgumentParser(add_option_string_dash_variants=DashVariant.DASH)
+        parser.add_arguments(cls, dest=dest)
+        return parser
 
     @property
     def url(self):

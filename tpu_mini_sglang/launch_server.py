@@ -5,7 +5,7 @@ from tpu_mini_sglang.server_args import ServerArgs
 from tpu_mini_sglang.utils import kill_process_tree
 
 if __name__ == "__main__":
-    server_args = ServerArgs.from_cli()
+    server_args = ServerArgs.build_parser(dest="cfg").parse_args().cfg
     try:
         launch_server(server_args)
     finally:
