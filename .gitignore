@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# hatch-vcs generated version file, specified in pyproject.toml
+tpu_mini_sglang/_version.py

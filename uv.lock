@@ -1817,7 +1817,7 @@ wheels = [
 
 [[package]]
 name = "tpu-mini-sglang"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "flax" },
