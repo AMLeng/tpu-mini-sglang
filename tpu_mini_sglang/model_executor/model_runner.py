@@ -2,9 +2,11 @@ import logging
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_mini_sglang.layers.attention_backends.native_attention import NativeAttention
+from tpu_mini_sglang.layers.sampler import Sampler, get_jitted_sampler
 from tpu_mini_sglang.managers.scheduler_struct import (
     GenerationBatchResult,
     ScheduleBatch,
@@ -28,6 +30,8 @@ class ModelRunner:
         self.model_config = model_config
         self.mesh = mesh
         self.model_fn = get_jitted_model(config=model_config, mesh=self.mesh)
+        sampler_graphdef, self.sampler_state = nnx.split(Sampler(mesh=self.mesh))
+        self.sampler_fn = get_jitted_sampler(sampler_graphdef)
         self.attn_backend = NativeAttention(
             num_heads=model_config.num_heads,
             head_dim=model_config.head_dim,
@@ -46,11 +50,16 @@ class ModelRunner:
         # JIT boundary; model_fn is jit compiled
         cache.kv_buffer, full_logits = self.model_fn(cache.kv_buffer, forward_batch)
 
-        # We use take :len(reqs) to only get the logits for real (non padding) sequences
         last_token_loc = jnp.cumsum(forward_batch.extend_lens) - 1
-        logits = full_logits[last_token_loc][: len(batch.reqs)]
+        logits = full_logits[last_token_loc]  # Now has shape (padded_batch_len, vocab)
 
-        next_token_ids = jnp.argmax(logits, axis=-1)  # Greedy sampling for now
+        # Unlike the model, the sampler is stateful (nnx.Rngs) so we need to update the state
+        self.sampler_state, next_token_ids = self.sampler_fn(
+            self.sampler_state, logits, forward_batch.sampling_metadata
+        )
+
+        # We use take :len(reqs) to only get the ids for real (non padding) sequences
+        next_token_ids = next_token_ids[: len(batch.reqs)]
 
         return GenerationBatchResult(next_token_ids=next_token_ids.tolist())
 

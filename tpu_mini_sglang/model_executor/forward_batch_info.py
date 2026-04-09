@@ -8,6 +8,8 @@ from jax.tree_util import register_dataclass
 from tpu_mini_sglang.managers.scheduler_struct import (
     ScheduleBatch,
 )
+from tpu_mini_sglang.sampling.sampling_batch_info import SamplingMetadata
+from tpu_mini_sglang.sampling.sampling_params import TOP_K_ALL
 
 if TYPE_CHECKING:
     from tpu_mini_sglang.layers.attention_backends.base_attention_backend import (
@@ -37,6 +39,8 @@ class ForwardBatch:
 
     extend_lens: jax.Array
 
+    sampling_metadata: SamplingMetadata
+
     @classmethod
     def init_new(cls, batch: ScheduleBatch, model_runner: ModelRunner):
         input_ids: list[int] = []
@@ -44,6 +48,10 @@ class ForwardBatch:
         seq_lens: list[int] = []
         extend_lens: list[int] = []
         req_pool_indices: list[int] = []
+
+        temperature: list[float] = []
+        top_p: list[float] = []
+        top_k: list[int] = []
 
         # Gather request information together
         for req in batch.reqs:
@@ -59,6 +67,10 @@ class ForwardBatch:
 
             seq_lens.append(len(full_ids))
             req_pool_indices.append(req.req_pool_idx)
+
+            temperature.append(req.req_info.sampling_params.temperature)
+            top_p.append(req.req_info.sampling_params.top_p)
+            top_k.append(req.req_info.sampling_params.top_k)
 
         # Add padding to prevent excessive JAX jits
         # Since we must recompile every time the input is a different size
@@ -77,6 +89,11 @@ class ForwardBatch:
         jax_extend_lens = jnp.array(extend_lens + batch_pad_len * [0])
         jax_req_pool_indices = jnp.array(req_pool_indices + batch_pad_len * [0])
 
+        # Pad sampling params with no-op sentinel values
+        jax_temperature = jnp.array(temperature + batch_pad_len * [1.0])
+        jax_top_p = jnp.array(top_p + batch_pad_len * [1.0])
+        jax_top_k = jnp.array(top_k + batch_pad_len * [TOP_K_ALL])
+
         # Right now we copy over req_to_token from CPU to the TPU on every batch construction
         # This makes the CPU/TPU divide clear and avoids unnecessary CPU/TPU synchronization
         # This also lets us update req_to_token on the CPU, while the TPU copy is read-only
@@ -89,4 +106,10 @@ class ForwardBatch:
             extend_lens=jax_extend_lens,
             out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,
+            sampling_metadata=SamplingMetadata(
+                temperature=jax_temperature,
+                top_p=jax_top_p,
+                top_k=jax_top_k,
+                do_greedy=all(tk == 1 for tk in top_k),
+            ),
         )

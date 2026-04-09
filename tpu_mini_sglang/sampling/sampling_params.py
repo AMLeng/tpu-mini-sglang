@@ -15,7 +15,9 @@ class SamplingParams(BaseModel):
 
     @model_validator(mode="after")
     def set_greedy(self):
-        if self.temperature <= 0.0:
+        # Fall back to greedy for temperature ~0
+        # Uses same threshold as tpu-inference and SGLang-JAX
+        if self.temperature < 1e-5:
             self.temperature = 1.0
             self.top_k = 1
         return self
