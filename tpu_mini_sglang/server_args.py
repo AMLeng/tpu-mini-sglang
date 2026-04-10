@@ -30,6 +30,8 @@ class ServerArgs:
 
     page_size: int = 1
     max_num_batched_tokens: int = 8192
+    max_num_batched_requests: int = 256
+    skip_scheduler_warmup: bool = False  # If set, skip JIT precompilation/Scheduler warmup
 
     @classmethod
     def build_parser(cls, dest: str = "cfg") -> ArgumentParser:

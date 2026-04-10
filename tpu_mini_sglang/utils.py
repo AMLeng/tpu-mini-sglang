@@ -90,6 +90,15 @@ def approximate_model_size(model_config: ModelConfig, dtype_size: int):
     return dtype_size * (mlp_params + attention_params + embedding_params)
 
 
+def get_paddings(min_padding: int, max_padding: int):
+    # Generates all powers of two between min and max, inclusive
+    return [
+        1 << i
+        for i in range(0, max_padding.bit_length() + 1)
+        if min_padding <= (1 << i) <= max_padding
+    ]
+
+
 def configure_logger(server_args: ServerArgs, prefix: str = ""):
     log_format = f"[%(asctime)s {prefix}%(name)s] %(message)s"
     logging.basicConfig(

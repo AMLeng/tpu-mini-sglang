@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import jax
@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from jax.tree_util import register_dataclass
 
 from tpu_mini_sglang.managers.scheduler_struct import (
+    ForwardMode,
     ScheduleBatch,
 )
 from tpu_mini_sglang.sampling.sampling_batch_info import SamplingMetadata
@@ -41,6 +42,8 @@ class ForwardBatch:
 
     sampling_metadata: SamplingMetadata
 
+    forward_mode: ForwardMode = field(metadata={"static": True})
+
     @classmethod
     def init_new(cls, batch: ScheduleBatch, model_runner: ModelRunner):
         input_ids: list[int] = []
@@ -72,12 +75,13 @@ class ForwardBatch:
             top_p.append(req.req_info.sampling_params.top_p)
             top_k.append(req.req_info.sampling_params.top_k)
 
+        # Collapses MIXED to PREFILL since it can be handled the same way
+        forward_mode = ForwardMode.DECODE if batch.forward_mode.is_decode() else ForwardMode.PREFILL
         # Add padding to prevent excessive JAX jits
         # Since we must recompile every time the input is a different size
-        QUERY_CHUNK_SIZE = 256
-        query_pad_len = (QUERY_CHUNK_SIZE - (len(input_ids) % QUERY_CHUNK_SIZE)) % QUERY_CHUNK_SIZE
-        BATCH_CHUNK_SIZE = 4
-        batch_pad_len = (BATCH_CHUNK_SIZE - (len(seq_lens) % BATCH_CHUNK_SIZE)) % BATCH_CHUNK_SIZE
+        query_pad_len, batch_pad_len = model_runner.get_pad_lengths(
+            len(input_ids), len(seq_lens), forward_mode
+        )
 
         # Construct arrays on the tpu(s)
         jax_input_ids = jnp.array(input_ids + query_pad_len * [0])
@@ -106,6 +110,7 @@ class ForwardBatch:
             extend_lens=jax_extend_lens,
             out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,
+            forward_mode=forward_mode,
             sampling_metadata=SamplingMetadata(
                 temperature=jax_temperature,
                 top_p=jax_top_p,

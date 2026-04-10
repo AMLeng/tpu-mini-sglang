@@ -28,7 +28,11 @@ from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
-from tpu_mini_sglang.utils import configure_logger, get_exception_traceback, get_zmq_socket
+from tpu_mini_sglang.utils import (
+    configure_logger,
+    get_exception_traceback,
+    get_zmq_socket,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +65,9 @@ class Scheduler:
             data_parallelism=self.server_args.dp, tensor_parallelism=self.server_args.tp
         )
         self.model_runner = ModelRunner(
-            self.model_config,
-            self.mesh,
+            model_config=self.model_config,
+            server_args=self.server_args,
+            mesh=self.mesh,
         )
 
         # Init KV Cache
@@ -72,6 +77,12 @@ class Scheduler:
             page_size=self.server_args.page_size,
             kv_cache_dtype=self.model_config.dtype,
         )
+
+        # Warmups to force JIT precompilation for different token/req batch sizes
+        if not self.server_args.skip_scheduler_warmup:
+            logger.info("Beginning precompile")
+            self.model_runner.precompile(self.kv_cache, self.req_to_token_pool)
+            logger.info("Finished precompile")
 
     def run_event_loop(self):
         while True:
@@ -127,7 +138,6 @@ class Scheduler:
             rid=recv_req.rid,
             origin_input_ids=recv_req.input_ids,
             sampling_params=sampling_params,
-            eos_token_ids=self.model_config.hf_eos_token_id,
             stream=recv_req.stream,
         )
         self.waiting_queue.append(req_info)
@@ -189,7 +199,7 @@ class Scheduler:
         # Then begin processing all non-chunked reqs
         # Past this point, we should not reference batch any more
         reqs = [
-            ProcessedReqState.process_req(r, next_token_id)
+            ProcessedReqState.process_req(r, next_token_id, self.model_config.hf_eos_token_id)
             for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True)
             if not r.prefill_unfinished
         ]
@@ -265,7 +275,7 @@ class Scheduler:
         page_size: int,
         kv_cache_dtype: np.dtype,
     ):
-        # Formula from SGLang
+        # Formula from SGLang; always at least 2048
         max_running_requests = min(
             max(
                 int(max_kv_tokens / self.model_config.context_len * 512),

@@ -8,14 +8,16 @@ from jax.sharding import Mesh
 from tpu_mini_sglang.layers.attention_backends.native_attention import NativeAttention
 from tpu_mini_sglang.layers.sampler import Sampler, get_jitted_sampler
 from tpu_mini_sglang.managers.scheduler_struct import (
+    ForwardMode,
     GenerationBatchResult,
     ScheduleBatch,
 )
-from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool
+from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 from tpu_mini_sglang.models.model_loader import get_jitted_model
-from tpu_mini_sglang.utils import approximate_model_size
+from tpu_mini_sglang.server_args import ServerArgs
+from tpu_mini_sglang.utils import approximate_model_size, get_paddings
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ class ModelRunner:
     def __init__(
         self,
         model_config: ModelConfig,
+        server_args: ServerArgs,
         mesh: Mesh,
         kv_page_size: int = 1,
     ):
@@ -37,6 +40,17 @@ class ModelRunner:
             head_dim=model_config.head_dim,
             num_kv_heads=model_config.num_kv_heads,
         )
+
+        min_token_paddings = 64
+        min_batch_paddings = 4
+        _token_paddings = get_paddings(min_token_paddings, server_args.max_num_batched_tokens)
+        _req_paddings = get_paddings(min_batch_paddings, server_args.max_num_batched_requests)
+
+        # Source of truth for what padding sizes to use for different ForwardModes
+        # We use a single source of truth to avoid risk of JIT recompilation
+        # Paddings are arrays of (token_padding, req_padding)
+        self._prefill_paddings = [(x, _req_paddings[-1]) for x in _token_paddings]
+        self._decode_paddings = [(x, x) for x in _req_paddings]
 
     def forward_batch_generation(
         self, cache: MHATokenToKVPool, batch: ScheduleBatch
@@ -118,3 +132,47 @@ class ModelRunner:
             bytes_per_token,
         )
         return cache_size
+
+    def get_pad_lengths(
+        self, num_tokens: int, num_reqs: int, forward_mode: ForwardMode
+    ) -> tuple[int, int]:
+        paddings = self._decode_paddings if forward_mode.is_decode() else self._prefill_paddings
+
+        # Finds smallest padding in paddings that can handle the given input
+        padding = next(((x, y) for (x, y) in paddings if x >= num_tokens and y >= num_reqs), None)
+        if padding is None:
+            raise RuntimeError(
+                f"Could not find valid padding for {num_tokens} tokens and {num_reqs} requests.\n"
+                f"Currently consider possible paddings: {paddings}."
+            )
+        total_toks, total_reqs = padding
+        return total_toks - num_tokens, total_reqs - num_reqs
+
+    def precompile(self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool) -> None:
+        # Mixed batches will be treated the same as prefill
+        self._precompile_prefill(cache=cache, req_to_token_pool=req_to_token_pool)
+        self._precompile_decode(cache=cache, req_to_token_pool=req_to_token_pool)
+
+    def _precompile_prefill(
+        self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool
+    ) -> None:
+        for num_tokens, num_reqs in self._prefill_paddings:
+            synthetic_batch = ScheduleBatch.generate_synthetic(
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                forward_mode=ForwardMode.PREFILL,
+                req_to_token_pool=req_to_token_pool,
+            )
+            self.forward_batch_generation(cache=cache, batch=synthetic_batch)
+
+    def _precompile_decode(
+        self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool
+    ) -> None:
+        for num_tokens, num_reqs in self._decode_paddings:
+            synthetic_batch = ScheduleBatch.generate_synthetic(
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                forward_mode=ForwardMode.DECODE,
+                req_to_token_pool=req_to_token_pool,
+            )
+            self.forward_batch_generation(cache=cache, batch=synthetic_batch)
