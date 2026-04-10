@@ -140,3 +140,39 @@ def log_runtime(name: str | None = None, jax_sync=False):
         return wrapper
 
     return decorator
+
+
+class _JaxCompileLogFilter(logging.Filter):
+    # perf_logger MUST NOT be a child of any jax_loggers or this will infinite loop
+    def __init__(self, function_names: list[str]):
+        super().__init__()
+        self.perf_logger = logging.getLogger(PERF_LOGGER_NAME)
+        prefix = "Finished XLA compilation of jit("
+        suffix = ")"
+        # Warn on primary compile lines
+        self.warning_strings = {prefix + name + suffix for name in function_names}
+        # Suppress other related messages
+        self.suppress_strings = {
+            "Finished tracing + transforming",
+            "Compiling jit",
+            "Finished jaxpr to MLIR module conversion jit",
+            "Finished XLA compilation of jit",
+        }
+
+    def filter(self, record):
+        msg = record.getMessage()
+        if any(substr in msg for substr in self.warning_strings):
+            self.perf_logger.warning("Unexpected JAX recompilation: %s", msg.splitlines()[0])
+            return False  # Suppress output
+        # Decide to suppress output or not
+        return not any(substr in msg for substr in self.suppress_strings)
+
+
+def activate_jax_log_compiles(function_names: list[str]):
+    gate = _JaxCompileLogFilter(function_names)
+    jax_loggers = {"jax._src.dispatch", "jax._src.interpreters.pxla"}
+    for logger_name in jax_loggers:
+        jax_logger = logging.getLogger(logger_name)
+        if not any(isinstance(f, _JaxCompileLogFilter) for f in jax_logger.filters):
+            jax_logger.addFilter(gate)
+    jax.config.update("jax_log_compiles", True)

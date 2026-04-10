@@ -29,6 +29,7 @@ from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
 from tpu_mini_sglang.utils import (
+    activate_jax_log_compiles,
     configure_logger,
     get_exception_traceback,
     get_zmq_socket,
@@ -83,6 +84,7 @@ class Scheduler:
             logger.info("Beginning precompile")
             self.model_runner.precompile(self.kv_cache, self.req_to_token_pool)
             logger.info("Finished precompile")
+            activate_jax_log_compiles(function_names=["apply_sampler", "apply_model"])
 
     def run_event_loop(self):
         while True:
