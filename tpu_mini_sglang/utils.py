@@ -1,10 +1,13 @@
 import logging
 import os
 import sys
+import time
 import traceback
 from contextlib import suppress
+from functools import wraps
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 import psutil
 import zmq
@@ -12,6 +15,8 @@ import zmq
 if TYPE_CHECKING:
     from tpu_mini_sglang.model_config import ModelConfig
     from tpu_mini_sglang.server_args import ServerArgs
+
+PERF_LOGGER_NAME = "tpu_mini_sglang.perf"
 
 
 def get_exception_traceback():
@@ -93,3 +98,36 @@ def configure_logger(server_args: ServerArgs, prefix: str = ""):
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
+    logging.getLogger(PERF_LOGGER_NAME).setLevel(server_args.perf_log_level.upper())
+
+
+def log_runtime(name: str | None = None, jax_sync=False):
+    # If perf_log_level is set to debug, logs runtimes of decorated functions
+    # Add jax_sync=True for functions returning a jax pytree
+    # since otherwise we would just measure jax dispatch, not execution
+    perf_logger = logging.getLogger(PERF_LOGGER_NAME)
+
+    def decorator(func):
+        logname = name if name is not None else func.__name__
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            do_perf = perf_logger.isEnabledFor(logging.DEBUG)
+            if do_perf:
+                start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            if do_perf:
+                if jax_sync:
+                    jax.block_until_ready(result)
+                end_time = time.perf_counter()
+                perf_logger.debug(
+                    "%s runtime: %.6f s",
+                    logname,
+                    end_time - start_time,
+                )
+
+            return result
+
+        return wrapper
+
+    return decorator

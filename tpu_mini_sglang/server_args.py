@@ -23,7 +23,8 @@ class ServerArgs:
 
     # Logging
 
-    log_level: str = "info"  # The logging level of all loggers.
+    log_level: str = "info"  # The default logging level of all loggers.
+    perf_log_level: str = "info"  # The logging level of performance loggers.
 
     # Scheduling
 
