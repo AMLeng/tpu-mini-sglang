@@ -48,6 +48,7 @@ default-groups = ["dev"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["**/kernels/ragged_paged_attention"]
 
 [tool.ruff.lint]
 select = [

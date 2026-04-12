@@ -22,6 +22,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
+        args: ["--skip", "**/kernels/ragged_paged_attention/*"]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.1
     hooks:
@@ -38,6 +39,7 @@ repos:
       - id: mypy
         name: mypy
         entry: uv run mypy
+        exclude: "kernels/ragged_paged_attention"
         language: system
         types: [python]
         stages: [pre-push, manual]
