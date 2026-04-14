@@ -59,8 +59,7 @@ class NativeAttention(BaseAttentionBackend):
         kv_ragged_arange = make_ragged_arange(forward_batch.seq_lens, num_kv_tokens)
 
         # Copy necessary data from k_cache, v_cache
-        req_pool_indices = forward_batch.req_pool_indices[kv_seq_ids]
-        kv_cache_indices = forward_batch.req_to_token[req_pool_indices, kv_ragged_arange]
+        kv_cache_indices = forward_batch.req_to_token[kv_seq_ids, kv_ragged_arange]
         cached_k = k_cache[kv_cache_indices]  # (s, num_kv_heads, head_dim)
         cached_v = v_cache[kv_cache_indices]  # (s, num_kv_heads, head_dim)
 

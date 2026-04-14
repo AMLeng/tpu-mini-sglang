@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.tree_util import register_dataclass
 
 from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
@@ -32,8 +33,7 @@ class ForwardBatch:
     seq_lens: jax.Array
 
     # KV Cache info
-    req_pool_indices: jax.Array  # Indices of request in ReqToTokenPool
-    req_to_token: jax.Array  # (max_running_requests, max_context_len) page table
+    req_to_token: jax.Array  # (padded_batch_len, max_context_len) page table
     out_cache_loc: jax.Array
 
     attn_backend: BaseAttentionBackend
@@ -91,22 +91,19 @@ class ForwardBatch:
         jax_out_cache_loc = jnp.array(list(batch.out_cache_loc) + query_pad_len * [0])
         jax_seq_lens = jnp.array(seq_lens + batch_pad_len * [0])
         jax_extend_lens = jnp.array(extend_lens + batch_pad_len * [0])
-        jax_req_pool_indices = jnp.array(req_pool_indices + batch_pad_len * [0])
+        padded_req_pool_indices = np.array(req_pool_indices + batch_pad_len * [0])
 
         # Pad sampling params with no-op sentinel values
         jax_temperature = jnp.array(temperature + batch_pad_len * [1.0])
         jax_top_p = jnp.array(top_p + batch_pad_len * [1.0])
         jax_top_k = jnp.array(top_k + batch_pad_len * [TOP_K_ALL])
 
-        # Right now we copy over req_to_token from CPU to the TPU on every batch construction
-        # This makes the CPU/TPU divide clear and avoids unnecessary CPU/TPU synchronization
-        # This also lets us update req_to_token on the CPU, while the TPU copy is read-only
+        # We gather the relevant rows of req_to_token on CPU and only transfer the ones we need
         return cls(
             input_ids=jax_input_ids,
             positions=jax_positions,
             seq_lens=jax_seq_lens,
-            req_pool_indices=jax_req_pool_indices,
-            req_to_token=jnp.array(batch.req_to_token),
+            req_to_token=jnp.array(batch.req_to_token[padded_req_pool_indices]),
             extend_lens=jax_extend_lens,
             out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,
