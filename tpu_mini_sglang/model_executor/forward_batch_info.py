@@ -5,9 +5,9 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import register_dataclass
 
+from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
     ForwardMode,
-    ScheduleBatch,
 )
 from tpu_mini_sglang.sampling.sampling_batch_info import SamplingMetadata
 from tpu_mini_sglang.sampling.sampling_params import TOP_K_ALL

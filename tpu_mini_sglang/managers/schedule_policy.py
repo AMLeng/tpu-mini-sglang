@@ -1,9 +1,9 @@
 from enum import Enum, auto
 
+from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
     PrefillReqState,
     ReqInfo,
-    ScheduleBatch,
 )
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 

@@ -7,10 +7,10 @@ from jax.sharding import Mesh
 
 from tpu_mini_sglang.layers.attention_backends.native_attention import NativeAttention
 from tpu_mini_sglang.layers.sampler import Sampler, get_jitted_sampler
+from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
     ForwardMode,
     GenerationBatchResult,
-    ScheduleBatch,
 )
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.model_config import ModelConfig

@@ -10,6 +10,7 @@ from tpu_mini_sglang.managers.io_struct import (
     BatchTokenIDOutput,
     TokenizedGenerateRequest,
 )
+from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.schedule_policy import (
     AddReqResult,
     PrefillAdder,
@@ -19,7 +20,6 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     PrefillReqState,
     ProcessedReqState,
     ReqInfo,
-    ScheduleBatch,
 )
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool

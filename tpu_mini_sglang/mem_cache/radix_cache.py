@@ -1,35 +1,16 @@
 import heapq
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
 
 import numpy as np
 
+from tpu_mini_sglang.managers.scheduler_struct import (
+    PrefillReqState,
+    PreparedReqState,
+    ProcessedReqState,
+)
 from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
-
-if TYPE_CHECKING:
-    from tpu_mini_sglang.managers.scheduler_struct import (
-        PrefillReqState,
-        PreparedReqState,
-        ProcessedReqState,
-    )
-
-
-@dataclass(eq=False)
-class TreeNode:
-    key: list[int]
-    value: np.ndarray  # len(value) == len(key)
-    parent: Self | None
-    children: dict[tuple[int, ...], Self]
-    lock_count: int
-    last_access_time: float
-
-    # Necessary to avoid type errors with heapq
-    # heapq compares tuple elements left-to-right; when last_access_time ties in evictable_heap
-    # it falls through to comparing TreeNode objects, which would TypeError without this method.
-    def __lt__(self, other: Self):
-        return self.last_access_time < other.last_access_time
+from tpu_mini_sglang.mem_cache.tree_node import TreeNode
 
 
 class RadixCache:
