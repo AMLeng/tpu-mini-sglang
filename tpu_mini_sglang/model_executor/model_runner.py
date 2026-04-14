@@ -81,13 +81,13 @@ class ModelRunner:
         self,
         kv_cache_dtype: jnp.dtype,
     ):
-        HAIRCUT_FACTOR = 0.9  # Leave 10% of the memory for misc non-kv-cache uses
+        HAIRCUT_FACTOR = 0.8  # Leave 20% of the memory for misc non-kv-cache uses
         dtype_itemsize = kv_cache_dtype.itemsize
         devices = jax.devices()
         platform = devices[0].platform
         if platform == "tpu":
             memory_per_device = [
-                mem_stats["byte_limit"] - mem_stats["bytes_in_use"]
+                mem_stats["bytes_limit"] - mem_stats["bytes_in_use"]
                 for device in devices
                 for mem_stats in [device.memory_stats()]
             ]
@@ -107,10 +107,6 @@ class ModelRunner:
                 self.model_config,
                 jnp.dtype(jnp.float32).itemsize + self.model_config.dtype.itemsize,
             )
-
-            # Finally, use a harsher haircut factor for good measure, to take care of other
-            # situations where a CPU might create additional unexpected copies
-            HAIRCUT_FACTOR = 0.8
         else:
             raise NotImplementedError("This library only supports running on CPU and TPU")
 
