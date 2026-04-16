@@ -20,31 +20,10 @@ import jax.numpy as jnp
 import logging
 
 from .util import (
-    align_to, get_dtype_packing, get_tpu_version, next_power_of_2)
+    align_to, get_device_name, get_dtype_packing, get_tpu_version, next_power_of_2
+)
 
 logger = logging.getLogger(__name__)
-
-def get_device_name(num_devices: int | None = None):
-    kind = jax.devices()[0].device_kind
-    if 'TPU' not in kind:
-        raise RuntimeError('Expected TPU devices')
-    suffix = ''
-    if kind.endswith(' lite'):
-        kind = kind[:-len(' lite')]
-        suffix = 'e'
-    elif kind.endswith('e'):
-        kind = kind[:-1]
-        suffix = 'e'
-    elif kind.endswith('p'):
-        kind = kind[:-1]
-        suffix = 'p'
-    elif kind == 'TPU7x':
-        kind = 'TPU v7'
-    assert kind[:-1] == 'TPU v', kind
-    kind += suffix
-    if num_devices is not None:
-        kind += f'-{num_devices}'
-    return kind
 
 # key
 #   - device_name
@@ -4389,7 +4368,7 @@ def get_tuned_block_sizes(
         bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
             extra]
     except KeyError:
-        logger.warning_once(
+        logger.warning(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
         # When not available use a sensible default based on TPU version
         # Set default block sizes for each tpu_version.
@@ -4410,7 +4389,7 @@ def get_tuned_block_sizes(
     # waste computation. So we need the min here.
     bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
-    logger.info_once('RPA v3 kernel tuned block sizes for %s: bkv_p=%s, bq=%s',
+    logger.info('RPA v3 kernel tuned block sizes for %s: bkv_p=%s, bq=%s',
                      keys, bkv_p, bq)
     return bkv_p, bq
 
