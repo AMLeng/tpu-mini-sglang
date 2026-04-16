@@ -12,7 +12,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ProcessedReqState,
     ReqInfo,
 )
-from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
+from tpu_mini_sglang.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 from tpu_mini_sglang.mem_cache.tree_node import TreeNode
@@ -39,7 +39,7 @@ class ScheduleBatch:
         cls,
         reqs: list[PrefillReqState],
         req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         tree_cache: RadixCache,
     ) -> Self:
         # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
@@ -52,41 +52,50 @@ class ScheduleBatch:
         if req_pool_indices is None:
             raise RuntimeError("Ran out of running request slots.")
 
+        # Update req_to_token_pool with our prefix indices for non-chunked reqs
+        # Chunked requests already had their prefix indices written previously
+        # so we don't need to loop over them here
+        for prefill_req, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True):
+            prefix_indices = prefill_req.prefix_indices
+            req_to_token_pool.write(
+                (
+                    req_pool_idx,
+                    slice(0, len(prefix_indices)),
+                ),
+                prefix_indices,
+            )
+
         prepared_reqs = [
             PreparedReqState.init_prefill_req(r, req_pool_idx)
             for r, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True)
         ] + [PreparedReqState.init_prefill_req_from_chunked(req) for req in chunked_reqs]
-        # Created in parallel to prepared_reqs
-        prefill_reqs = need_req_slot + chunked_reqs
 
-        total_extend_len = sum(r.extend_len for r in prepared_reqs)
+        # Created in parallel to prepared_reqs
+        prefix_lens = np.asarray([len(r.prefix_indices) for r in need_req_slot + chunked_reqs])
 
         # Allocate actual cache
+        total_extend_len = sum(r.extend_len for r in prepared_reqs)
         tree_cache.ensure_free_size(total_extend_len)
-        out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+        if token_to_kv_pool_allocator.page_size == 1:
+            out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+        else:
+            extend_lens = np.asarray([r.extend_len for r in prepared_reqs])
+            out_cache_loc = token_to_kv_pool_allocator.alloc_prefill(
+                prefix_lens=prefix_lens,
+                seq_lens=prefix_lens + extend_lens,
+            )
         if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")
 
         # Update req_to_token_pool information
         pt = 0
-        for prefill_req, req in zip(prefill_reqs, prepared_reqs, strict=True):
+        for i, req in enumerate(prepared_reqs):
             # We use pt to step through out_cache_loc
             # Since out_cache_loc is a flattened list of length total_extend_len
-            prefix_indices = prefill_req.prefix_indices
-            prefix_len = len(prefix_indices)
-            # Chunked requests already had their prefix indices written previously
-            if prefill_req.req_pool_idx is None:
-                req_to_token_pool.write(
-                    (
-                        req.req_pool_idx,
-                        slice(0, len(prefix_indices)),
-                    ),
-                    prefix_indices,
-                )
             req_to_token_pool.write(
                 (
                     req.req_pool_idx,
-                    slice(prefix_len, prefix_len + req.extend_len),
+                    slice(prefix_lens[i], prefix_lens[i] + req.extend_len),
                 ),
                 out_cache_loc[pt : pt + req.extend_len],
             )
@@ -104,22 +113,27 @@ class ScheduleBatch:
         cls,
         reqs: list[ProcessedReqState],
         req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         tree_cache: RadixCache,
     ) -> Self:
         prepared_reqs = [PreparedReqState.init_decode_req(r) for r in reqs]
         total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
-        # Allocate actual cache
-        tree_cache.ensure_free_size(total_extend_len)
-        out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
-        if out_cache_loc is None:
-            raise RuntimeError("Ran out of kv cache slots.")
-
         req_pool_indices = np.asarray([r.req_pool_idx for r in prepared_reqs])
         seq_lens = np.asarray(
             [len(r.req_info.origin_input_ids) + len(r.output_ids) for r in prepared_reqs]
         )
+
+        # Allocate actual cache
+        tree_cache.ensure_free_size(total_extend_len)
+        if token_to_kv_pool_allocator.page_size == 1:
+            out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+        else:
+            out_cache_loc = token_to_kv_pool_allocator.alloc_decode(
+                prev_cache_loc=req_to_token_pool.req_to_token[req_pool_indices, seq_lens - 2]
+            )
+        if out_cache_loc is None:
+            raise RuntimeError("Ran out of kv cache slots.")
 
         # Update req_to_token_pool information
         req_to_token_pool.write(

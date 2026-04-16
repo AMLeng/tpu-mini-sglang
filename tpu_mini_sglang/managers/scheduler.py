@@ -21,7 +21,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     ProcessedReqState,
     ReqInfo,
 )
-from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
+from tpu_mini_sglang.mem_cache.allocator import PagedTokenToKVPoolAllocator, TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 from tpu_mini_sglang.model_config import ModelConfig
@@ -72,7 +72,6 @@ class Scheduler:
         )
 
         # Init KV Cache
-        assert self.server_args.page_size == 1  # The allocator cannot handle other page sizes yet
         self._init_memory_pool_and_cache(
             max_kv_tokens=self.model_runner.get_max_kv_tokens(self.model_config.dtype),
             page_size=self.server_args.page_size,
@@ -289,8 +288,10 @@ class Scheduler:
         self.req_to_token_pool = ReqToTokenPool(
             max_running_requests=max_running_requests, max_context_len=self.model_config.context_len
         )
-        self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
-            size=max_kv_tokens,
+        allocator_class = TokenToKVPoolAllocator if page_size == 1 else PagedTokenToKVPoolAllocator
+        self.token_to_kv_pool_allocator = allocator_class(
+            num_tokens=max_kv_tokens,
+            page_size=page_size,
         )
         self.kv_cache = MHATokenToKVPool(
             cache_size=max_kv_tokens,

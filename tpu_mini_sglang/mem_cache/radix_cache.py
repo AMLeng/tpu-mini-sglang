@@ -8,7 +8,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     PreparedReqState,
     ProcessedReqState,
 )
-from tpu_mini_sglang.mem_cache.allocator import TokenToKVPoolAllocator
+from tpu_mini_sglang.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
 from tpu_mini_sglang.mem_cache.tree_node import TreeNode
 
@@ -18,7 +18,7 @@ class RadixCache:
         self,
         page_size: int,
         req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: TokenToKVPoolAllocator,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
     ):
         self.page_size = page_size
         self.root = TreeNode(
