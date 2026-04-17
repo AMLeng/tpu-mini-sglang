@@ -13,7 +13,7 @@ from tpu_mini_sglang.layers.swiglu import SwiGLU as LlamaMLP
 from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 from tpu_mini_sglang.models.model_base import ModelBase
 from tpu_mini_sglang.sharding import ShardingAxisName
-from tpu_mini_sglang.utils import get_jax_dtype
+from tpu_mini_sglang.utils import get_jax_dtype, get_padded_head_dim, reshape_and_pad_weight
 
 # Should never actually be applied, since all models are loaded abstractly with nnx.eval_shape
 _dummy_init = nnx.initializers.uniform()
@@ -25,7 +25,7 @@ class LlamaAttention(nnx.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: int,
+        original_head_dim: int,
         max_position_embeddings: int,
         rope_theta: float,
         rope_scaling: dict[str, Any] | None,
@@ -33,6 +33,7 @@ class LlamaAttention(nnx.Module):
         dtype: jnp.dtype,
         rngs: nnx.Rngs,  # Required by the API contract of underlying default nnx modules
     ):
+        head_dim = get_padded_head_dim(original_head_dim)
         self.q_proj = nnx.Einsum(
             "TD,DNH->TNH",
             (hidden_size, num_heads, head_dim),
@@ -70,14 +71,13 @@ class LlamaAttention(nnx.Module):
             rngs=rngs,
         )
         self.rotary_embedding = Llama3RotaryEmbedding(
-            head_dim=head_dim,
+            rotary_dim=original_head_dim,
             base_freq=rope_theta,
             max_position_embeddings=max_position_embeddings,
             rope_scaling=rope_scaling,
         )
         self.attention = Attention(
             num_heads=num_heads,
-            head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             mesh=mesh,
         )
@@ -97,11 +97,14 @@ class LlamaAttention(nnx.Module):
 
 class LlamaDecoderLayer(nnx.Module):
     def __init__(self, config: LlamaConfig, mesh: Mesh, dtype: jnp.dtype, rngs: nnx.Rngs):
+        original_head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
         self.attention = LlamaAttention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            head_dim=getattr(config, "head_dim", config.hidden_size // config.num_attention_heads),
+            original_head_dim=original_head_dim,
             max_position_embeddings=config.max_position_embeddings,
             rope_theta=config.rope_theta,
             rope_scaling=config.rope_scaling,
@@ -207,7 +210,13 @@ class LlamaForCausalLM(ModelBase):
                 weight = weight.T
             # Reshape all four attention projections
             if any(f"attention.{x}_proj" in key for x in "qkvo"):
-                weight = weight.reshape(flat_state[key].value.shape)
+                # Axis of head_dim in the target_shape, since we must pad head_dim
+                pad_axis = 1 if "attention.o_proj" in key else 2
+                weight = reshape_and_pad_weight(
+                    pad_axis=pad_axis,
+                    target_shape=flat_state[key].value.shape,
+                    weight=weight,
+                )
 
             # Error checking
             val = flat_state[key].value

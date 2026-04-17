@@ -176,3 +176,30 @@ def activate_jax_log_compiles(function_names: list[str]):
         if not any(isinstance(f, _JaxCompileLogFilter) for f in jax_logger.filters):
             jax_logger.addFilter(gate)
     jax.config.update("jax_log_compiles", True)
+
+
+def get_padded_head_dim(original_head_dim: int):
+    # ragged paged attention only takes head dims of 64 or div by 128
+    # So we pad for compatibility. TPUs have 128 lanes,
+    # so TPU kernels in general will want a head_dim divisible by 128
+    # (or two heads of size 64 packed together) for efficiency
+    if original_head_dim == 64:
+        return original_head_dim
+    else:
+        return ((original_head_dim + 127) // 128) * 128
+
+
+def reshape_and_pad_weight(pad_axis: int, target_shape: tuple[int, ...], weight: jax.Array):
+    # Unpack weight into the target shape, padding the dimension pad_axis if needed
+    assert 0 <= pad_axis < len(target_shape)
+    unpadded_shape = list(target_shape)
+    unpadded_shape[pad_axis] = -1
+    unpadded_weight = weight.reshape(unpadded_shape)
+
+    pad_spec = [(0, 0)] * unpadded_weight.ndim
+    pad = target_shape[pad_axis] - unpadded_weight.shape[pad_axis]
+    pad_spec[pad_axis] = (0, pad)
+
+    out = jnp.pad(unpadded_weight, pad_spec)
+    assert out.shape == tuple(target_shape)
+    return out

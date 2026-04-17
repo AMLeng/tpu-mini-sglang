@@ -9,7 +9,7 @@ from flax import nnx
 class Llama3RotaryEmbedding(nnx.Module):
     def __init__(
         self,
-        head_dim: int,
+        rotary_dim: int,
         base_freq: float,
         max_position_embeddings: int,
         rope_scaling: dict[str, Any] | None,
@@ -20,7 +20,8 @@ class Llama3RotaryEmbedding(nnx.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # Number of head dimensions the rotary embedding is applied in
-        self.rotary_dim = head_dim
+        # If we pad attention heads, this is typically the original unpadded dimension
+        self.rotary_dim = rotary_dim
 
         # Scaling config for Llama3.1 and later
         self.rope_scaling = rope_scaling
@@ -77,9 +78,9 @@ class Llama3RotaryEmbedding(nnx.Module):
     def __call__(
         self, positions: jax.Array, q: jax.Array, k: jax.Array
     ) -> tuple[jax.Array, jax.Array]:
-        # q, k have shape (n_tokens, kv_heads, head_dim), while positions has shape (n_tokens,)
+        # q, k have shape (n_tokens, kv_heads, head_dim)
+        # positions has shape (n_tokens,)
         # cos_sin_cache has shape (max_position_embeddings, rotary_dim)
-        # Right now, we have only implemented the case rotary_dim == head_dim
 
         # Computed every call because this should get folded in by jax.jit()
         # Cannot be computed in the init since initialization happens through nnx.eval_shape,
@@ -92,8 +93,8 @@ class Llama3RotaryEmbedding(nnx.Module):
         cos = cos[:, None, :]
         sin = sin[:, None, :]
 
-        q_real, q_imaginary = jnp.split(q, 2, axis=-1)
-        k_real, k_imaginary = jnp.split(k, 2, axis=-1)
+        q_real, q_imaginary = jnp.split(q[..., : self.rotary_dim], 2, axis=-1)
+        k_real, k_imaginary = jnp.split(k[..., : self.rotary_dim], 2, axis=-1)
         q_rot = jnp.concatenate(
             (cos * q_real - sin * q_imaginary, sin * q_real + cos * q_imaginary), axis=-1
         )
@@ -103,4 +104,10 @@ class Llama3RotaryEmbedding(nnx.Module):
 
         # We explicitly computed RoPE in float32 for numerical stability,
         # and thus need to explicitly cast to ensure the correct output dtypes
-        return q_rot.astype(q.dtype), k_rot.astype(k.dtype)
+        q_rot = q_rot.astype(q.dtype)
+        k_rot = k_rot.astype(k.dtype)
+
+        return (
+            jnp.concatenate([q_rot, q[..., self.rotary_dim :]], axis=-1),
+            jnp.concatenate([k_rot, k[..., self.rotary_dim :]], axis=-1),
+        )

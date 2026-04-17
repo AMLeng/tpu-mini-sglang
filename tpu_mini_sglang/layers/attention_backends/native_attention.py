@@ -9,6 +9,7 @@ class NativeAttention(BaseAttentionBackend):
     def __init__(
         self,
         num_heads: int,
+        original_head_dim: int,
         head_dim: int,
         num_kv_heads: int,
     ):
@@ -16,8 +17,9 @@ class NativeAttention(BaseAttentionBackend):
         self.num_heads = num_heads  # n
         self.num_kv_heads = num_kv_heads  # k
         self.num_groups = num_heads // num_kv_heads  # g
+        self.original_head_dim = original_head_dim
         self.head_dim = head_dim  # h
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.original_head_dim**-0.5
 
     def __call__(
         self,

@@ -38,6 +38,7 @@ class ModelRunner:
         self.attn_backend = NativeAttention(
             num_heads=model_config.num_heads,
             head_dim=model_config.head_dim,
+            original_head_dim=model_config.original_head_dim,
             num_kv_heads=model_config.num_kv_heads,
         )
 
