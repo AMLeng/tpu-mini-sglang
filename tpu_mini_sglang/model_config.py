@@ -25,11 +25,12 @@ class ModelConfig:
 
         self.num_layers = self.hf_text_config.num_hidden_layers
 
-        self.context_len = context_length or getattr(
+        hf_len = getattr(
             self.hf_text_config,
             "max_position_embeddings",
             2048,  # Use a conservative fallback
         )
+        self.context_len = hf_len if context_length is None else min(context_length, hf_len)
 
         # set self.hf_eos_token_id
         eos_ids = getattr(self.hf_text_config, "eos_token_id", None)
@@ -46,4 +47,4 @@ class ModelConfig:
 
     @classmethod
     def from_server_args(cls, server_args: ServerArgs):
-        return cls(model_path=server_args.model_path)
+        return cls(model_path=server_args.model_path, context_length=server_args.max_context_len)

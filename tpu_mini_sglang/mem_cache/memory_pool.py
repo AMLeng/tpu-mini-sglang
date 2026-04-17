@@ -3,10 +3,16 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding
 from jax.tree_util import register_pytree_node_class
 
-from tpu_mini_sglang.sharding import ShardingAxisName
+from tpu_mini_sglang.kernels.ragged_paged_attention.kernel import (
+    get_kv_cache_shape as get_kv_shape,
+)
+from tpu_mini_sglang.kernels.ragged_paged_attention.kernel_hd64 import (
+    get_kv_cache_shape as get_kv_shape_64,
+)
+from tpu_mini_sglang.sharding import RPA_CACHE_SHARDING, ShardingAxisName
 
 
 class ReqToTokenPool:
@@ -64,7 +70,7 @@ class MHATokenToKVPool:
 
     def __init__(
         self,
-        cache_size: int,
+        max_cache_size: int,
         page_size: int,
         num_layers: int,
         num_kv_heads: int,
@@ -72,17 +78,30 @@ class MHATokenToKVPool:
         mesh: Mesh,
         dtype: np.dtype,
     ):
-        # We use cache_size + page_size because we need an additional dummy page
+        # We initialize to the shape preferred by ragged paged attention by default
+        # However, each backend fully owns its own cache, and is the only reader/writer
+        # In particular, other backends are free to reshape before/after; we just use this
+        # default since RPA is the primary kernel used
+        cache_shape_fn = get_kv_shape_64 if head_dim == 64 else get_kv_shape
+
+        cache_pages = max_cache_size // page_size
+        # We use cache_pages + 1 because we need an additional dummy page
         # to be the write target for KV results of padding tokens
-        # For the sharding to work properly, KV caches need to be interleaved
-        # I.e. the entry for each token looks like [K0,V0,K1,V1,...]
-        # This is where the "2" in the shape comes from
+        cache_shape = cache_shape_fn(
+            total_num_pages=cache_pages + 1,
+            page_size=page_size,
+            actual_num_kv_heads=num_kv_heads,
+            actual_head_dim=head_dim,
+            kv_dtype=jnp.dtype(dtype),
+        )
+        if cache_shape[-2] == 1:
+            # For the sharding to work properly, each shard must contain full KV heads
+            # This will be fine as long as the following condition holds
+            assert num_kv_heads % mesh.shape[ShardingAxisName.ATTN_HEAD] == 0
         self.kv_buffer = [
             jax.jit(
-                lambda: jnp.zeros((cache_size + page_size, num_kv_heads, 2, head_dim), dtype=dtype),
-                out_shardings=NamedSharding(
-                    mesh, PartitionSpec(None, ShardingAxisName.ATTN_HEAD, None, None)
-                ),
+                lambda: jnp.zeros(cache_shape, dtype=dtype),
+                out_shardings=NamedSharding(mesh, RPA_CACHE_SHARDING),
             )()
             for _ in range(num_layers)
         ]

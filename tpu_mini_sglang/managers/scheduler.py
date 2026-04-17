@@ -69,6 +69,7 @@ class Scheduler:
             model_config=self.model_config,
             server_args=self.server_args,
             mesh=self.mesh,
+            kv_page_size=self.server_args.page_size,
         )
 
         # Init KV Cache
@@ -276,6 +277,9 @@ class Scheduler:
         page_size: int,
         kv_cache_dtype: np.dtype,
     ):
+        # Force max_kv_tokens to always be divisible by page_size
+        # since we can only ever manipulate the cache in full pages
+        max_kv_tokens = (max_kv_tokens // page_size) * page_size
         # Formula from SGLang; always at least 2048
         max_running_requests = min(
             max(
@@ -294,7 +298,7 @@ class Scheduler:
             page_size=page_size,
         )
         self.kv_cache = MHATokenToKVPool(
-            cache_size=max_kv_tokens,
+            max_cache_size=max_kv_tokens,
             page_size=page_size,
             num_layers=self.model_config.num_layers,
             num_kv_heads=self.model_config.num_kv_heads,

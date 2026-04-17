@@ -6,21 +6,6 @@ from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 
 
 class NativeAttention(BaseAttentionBackend):
-    def __init__(
-        self,
-        num_heads: int,
-        original_head_dim: int,
-        head_dim: int,
-        num_kv_heads: int,
-    ):
-        # static pytree values
-        self.num_heads = num_heads  # n
-        self.num_kv_heads = num_kv_heads  # k
-        self.num_groups = num_heads // num_kv_heads  # g
-        self.original_head_dim = original_head_dim
-        self.head_dim = head_dim  # h
-        self.scaling = self.original_head_dim**-0.5
-
     def __call__(
         self,
         kv_cache: jax.Array,
@@ -29,6 +14,15 @@ class NativeAttention(BaseAttentionBackend):
         v: jax.Array,  # (num_tokens, num_kv_heads, head_dim)
         forward_batch: ForwardBatch,
     ):
+        original_kv_shape = kv_cache.shape
+
+        # Check that we have as many elements per page as we expect, so that the reshape is valid
+        assert (
+            original_kv_shape[2] * original_kv_shape[3] * original_kv_shape[4]
+            == self.num_kv_heads * 2 * self.head_dim
+        )
+
+        kv_cache = kv_cache.reshape(-1, self.num_kv_heads, 2, self.head_dim)
         # update kv cache with newly computed values
         kv_cache = kv_cache.at[forward_batch.out_cache_loc, :, 0].set(k)
         kv_cache = kv_cache.at[forward_batch.out_cache_loc, :, 1].set(v)
@@ -88,7 +82,9 @@ class NativeAttention(BaseAttentionBackend):
         attn_scores = jnp.where(mask, attn_scores, -jnp.inf)
         attn_probs = jax.nn.softmax(attn_scores, axis=-1)
         attn_output = jnp.einsum("kgts,skh->tkgh", attn_probs, cached_v)
-        return kv_cache, attn_output.reshape(-1, self.num_heads, self.head_dim)
+        return kv_cache.reshape(original_kv_shape), attn_output.reshape(
+            -1, self.num_heads, self.head_dim
+        )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         sum_seq_lens: int = jnp.sum(forward_batch.seq_lens).item()

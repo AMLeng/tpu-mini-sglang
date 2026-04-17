@@ -1,6 +1,6 @@
 import jax
 import numpy as np
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec
 
 
 def create_device_mesh(data_parallelism: int, tensor_parallelism: int) -> Mesh:
@@ -27,3 +27,6 @@ class ShardingAxisName:
     MLP_TENSOR = "tensor"
     ATTN_HEAD = "tensor"
     VOCAB = ("tensor", "data")
+
+
+RPA_CACHE_SHARDING = PartitionSpec(None, None, ShardingAxisName.ATTN_HEAD, None, None)

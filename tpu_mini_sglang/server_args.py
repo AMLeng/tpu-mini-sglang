@@ -28,7 +28,8 @@ class ServerArgs:
 
     # Scheduling
 
-    page_size: int = 16
+    page_size: int = 128
+    max_context_len: int | None = None
     max_num_batched_tokens: int = 8192
     max_num_batched_requests: int = 256
     skip_scheduler_warmup: bool = False  # If set, skip JIT precompilation/Scheduler warmup

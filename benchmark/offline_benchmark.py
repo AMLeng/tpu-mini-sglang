@@ -44,7 +44,7 @@ async def main():
     num_iters = args.num_iters
     num_seqs = args.num_seqs
     server_args = args.server_args
-    model_config = ModelConfig(model_path=server_args.model_path)
+    model_config = ModelConfig.from_server_args(server_args)
 
     random.seed(0)
     generate_request = get_generate_req_fn(model_config.vocab_size)

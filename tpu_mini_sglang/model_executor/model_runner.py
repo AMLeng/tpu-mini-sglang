@@ -5,7 +5,9 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 
+from tpu_mini_sglang.layers.attention_backends.base_attention_backend import BaseAttentionBackend
 from tpu_mini_sglang.layers.attention_backends.native_attention import NativeAttention
+from tpu_mini_sglang.layers.attention_backends.ragged_paged_attention import RaggedPagedAttention
 from tpu_mini_sglang.layers.sampler import Sampler, get_jitted_sampler
 from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
@@ -28,18 +30,23 @@ class ModelRunner:
         model_config: ModelConfig,
         server_args: ServerArgs,
         mesh: Mesh,
-        kv_page_size: int = 1,
+        kv_page_size: int,
     ):
         self.model_config = model_config
         self.mesh = mesh
         self.model_fn = get_jitted_model(config=model_config, mesh=self.mesh)
         sampler_graphdef, self.sampler_state = nnx.split(Sampler(mesh=self.mesh))
         self.sampler_fn = get_jitted_sampler(sampler_graphdef)
-        self.attn_backend = NativeAttention(
+
+        devices = jax.devices()
+        attn_cls = RaggedPagedAttention if devices[0].platform == "tpu" else NativeAttention
+        self.attn_backend: BaseAttentionBackend = attn_cls(
             num_heads=model_config.num_heads,
             head_dim=model_config.head_dim,
             original_head_dim=model_config.original_head_dim,
             num_kv_heads=model_config.num_kv_heads,
+            page_size=kv_page_size,
+            mesh=self.mesh,
         )
 
         min_token_paddings = 64
