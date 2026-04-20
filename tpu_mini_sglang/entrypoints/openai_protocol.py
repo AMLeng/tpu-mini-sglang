@@ -13,14 +13,19 @@ from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 ############## Pydantic Models ##############
 
 
+class ContentPart(BaseModel):
+    type: Literal["text", "refusal"]
+    text: str
+
+
 class ChatCompletionDeveloperMessageParam(BaseModel):
-    content: str
+    content: str | list[ContentPart]
     role: Literal["developer"]
     name: str | None = None
 
 
 class ChatCompletionUserMessageParam(BaseModel):
-    content: str
+    content: str | list[ContentPart]
     role: Literal["user"]
     name: str | None = None
 
