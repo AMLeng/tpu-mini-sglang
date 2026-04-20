@@ -46,7 +46,10 @@ class SwiGLU(nnx.Module):
         self.activation = nn.silu
 
     def __call__(self, x: jax.Array):
-        gate = self.gate_proj(x)
-        up = self.up_proj(x)
+        with jax.named_scope("gate_proj"):
+            gate = self.gate_proj(x)
+        with jax.named_scope("up_proj"):
+            up = self.up_proj(x)
         fuse = self.activation(gate) * up
-        return self.down_proj(fuse)
+        with jax.named_scope("down_proj"):
+            return self.down_proj(fuse)

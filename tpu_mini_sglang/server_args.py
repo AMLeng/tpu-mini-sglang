@@ -35,6 +35,10 @@ class ServerArgs:
     max_num_batched_requests: int = 256
     skip_scheduler_warmup: bool = False  # If set, skip JIT precompilation/Scheduler warmup
 
+    # Profiling
+    use_jax_profiler_server: bool = False  # Whether to launch a jax.profiler server
+    profiler_port: int = 9999  # The port of the jax.profiler server
+
     @classmethod
     def build_parser(cls, dest: str = "cfg") -> ArgumentParser:
         parser = ArgumentParser(add_option_string_dash_variants=DashVariant.DASH)

@@ -83,16 +83,21 @@ class LlamaAttention(nnx.Module):
         )
 
     def _forward_prepare(self, positions, hidden_states):
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
-        q, k = self.rotary_embedding(positions, q, k)
+        with jax.named_scope("q_proj"):
+            q = self.q_proj(hidden_states)
+        with jax.named_scope("k_proj"):
+            k = self.k_proj(hidden_states)
+        with jax.named_scope("v_proj"):
+            v = self.v_proj(hidden_states)
+        with jax.named_scope("rope"):
+            q, k = self.rotary_embedding(positions, q, k)
         return q, k, v
 
     def __call__(self, kv_cache: jax.Array, x: jax.Array, forward_batch: ForwardBatch):
         q, k, v = self._forward_prepare(forward_batch.positions, x)
         new_kv_cache, output = self.attention(kv_cache, q, k, v, forward_batch)
-        return new_kv_cache, self.o_proj(output)
+        with jax.named_scope("o_proj"):
+            return new_kv_cache, self.o_proj(output)
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -152,7 +157,10 @@ class LlamaModel(nnx.Module):
         hidden_states = self.embed_tokens(forward_batch.input_ids)
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            kv_cache, hidden_states = layer(kv_cache, hidden_states, forward_batch)
+
+            with jax.named_scope(f"layer_{i}"):
+                kv_cache, hidden_states = layer(kv_cache, hidden_states, forward_batch)
+
             kv_caches[i] = kv_cache
         # We upcast the input to float32 before the norm for numerical stability, matching SGLang
         return kv_caches, self.norm(hidden_states.astype(jnp.float32)).astype(hidden_states.dtype)

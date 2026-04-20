@@ -51,7 +51,8 @@ def get_jitted_sampler(graphdef) -> Callable:
     @jax.jit
     def apply_sampler(state, *args, **kwargs):
         sampler = nnx.merge(graphdef, state)
-        output = sampler(*args, **kwargs)
+        with jax.named_scope("sampling"):
+            output = sampler(*args, **kwargs)
         _, new_state = nnx.split(sampler)
         return new_state, output
 

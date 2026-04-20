@@ -21,10 +21,11 @@ class Attention(nnx.Module):
         v: jax.Array,
         forward_batch: ForwardBatch,
     ):
-        return forward_batch.attn_backend(
-            kv_cache,
-            q,
-            k,
-            v,
-            forward_batch,
-        )
+        with jax.named_scope("attention"):
+            return forward_batch.attn_backend(
+                kv_cache,
+                q,
+                k,
+                v,
+                forward_batch,
+            )

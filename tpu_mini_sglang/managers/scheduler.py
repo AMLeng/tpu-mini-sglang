@@ -2,6 +2,7 @@ import logging
 import signal
 from multiprocessing.connection import Connection
 
+import jax
 import numpy as np
 import psutil
 import zmq
@@ -78,6 +79,10 @@ class Scheduler:
             page_size=self.server_args.page_size,
             kv_cache_dtype=self.model_config.dtype,
         )
+
+        # Init profiler server
+        if self.server_args.use_jax_profiler_server:
+            jax.profiler.start_server(self.server_args.profiler_port)
 
         # Warmups to force JIT precompilation for different token/req batch sizes
         if not self.server_args.skip_scheduler_warmup:
@@ -209,18 +214,20 @@ class Scheduler:
         self._stream_output(reqs)
 
         # Update caches
-        finished_reqs = [r for r in reqs if r.finished_reason is not None]
-        unfinished_reqs = [r for r in reqs if r.finished_reason is None]
-        req_pool_indices = []
-        for req in finished_reqs:
-            self.tree_cache.cache_finished_req(req)
-            req_pool_indices.append(req.req_pool_idx)
-        self.req_to_token_pool.free(req_pool_indices)  # Must happen after we cache reqs
-        for req in unfinished_reqs:
-            self.tree_cache.cache_unfinished_req(req)
+        with jax.profiler.TraceAnnotation("update_caches"):
+            finished_reqs = [r for r in reqs if r.finished_reason is not None]
+            unfinished_reqs = [r for r in reqs if r.finished_reason is None]
+            req_pool_indices = []
+            for req in finished_reqs:
+                self.tree_cache.cache_finished_req(req)
+                req_pool_indices.append(req.req_pool_idx)
+            self.req_to_token_pool.free(req_pool_indices)  # Must happen after we cache reqs
+            for req in unfinished_reqs:
+                self.tree_cache.cache_unfinished_req(req)
 
         if len(unfinished_reqs) == 0:
             return None
+
         return ScheduleBatch.prepare_for_decode(
             reqs=unfinished_reqs,
             req_to_token_pool=self.req_to_token_pool,
