@@ -46,9 +46,16 @@ def load_model(config: ModelConfig, mesh: Mesh) -> ModelBase:
 
 def get_jitted_model(config: ModelConfig, mesh: Mesh) -> Callable:
     model = load_model(config, mesh)
+    graphdef, state = nnx.split(model)
 
+    # We use a standard JAX pattern when passing nnx modules to a jitted function,
+    # splitting the constant graphdef and the mutable state.
+    # Closing over the graphdef reduces pytree traversal overhead when calling the function.
+    # The mutable state usually needs to be returned by the function to re-merge,
+    # but our model never mutates state, so we bind it with functools.partial.
     @jax.jit(donate_argnames=("kv_caches",))
-    def apply_model(my_model: nnx.Module, kv_caches: list[jax.Array], *args, **kwargs):
-        return my_model(kv_caches, *args, **kwargs)
+    def apply_model(my_state, kv_caches: list[jax.Array], forward_batch):
+        my_model = nnx.merge(graphdef, my_state)
+        return my_model(kv_caches, forward_batch)
 
-    return functools.partial(apply_model, model)
+    return functools.partial(apply_model, state)
