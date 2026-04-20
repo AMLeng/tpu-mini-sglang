@@ -8,6 +8,8 @@ import orjson
 import requests
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from tpu_mini_sglang.entrypoints.engine import launch_subprocesses
@@ -98,6 +100,18 @@ async def openai_v1_models():
     return ModelList(data=[model_card])
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning(
+        "Request validation failed: %s %s\nerrors=%s\nbody=%r",
+        request.method,
+        request.url,
+        exc.errors(),
+        exc.body,
+    )
+    return await request_validation_exception_handler(request, exc)
+
+
 def launch_server(server_args: ServerArgs):
     """
     Launches the HTTP server and engine:
@@ -122,7 +136,7 @@ def launch_server(server_args: ServerArgs):
         app,
         host=server_args.host,
         port=server_args.port,
-        log_level=server_args.log_level,
+        log_level=server_args.http_log_level or server_args.log_level,
         timeout_keep_alive=5,
         loop="uvloop",
     )

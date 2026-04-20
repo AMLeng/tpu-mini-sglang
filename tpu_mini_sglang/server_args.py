@@ -24,6 +24,7 @@ class ServerArgs:
     # Logging
 
     log_level: str = "info"  # The default logging level of all loggers.
+    http_log_level: str | None = None  # The logging level of the http server logger.
     perf_log_level: str = "info"  # The logging level of performance loggers.
 
     # Scheduling
