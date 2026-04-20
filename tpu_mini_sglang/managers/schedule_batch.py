@@ -164,11 +164,11 @@ class ScheduleBatch:
             lock_count=0,
             last_access_time=0,
         )
-        # We pad the first request so that across all requests, there are num_tokens tokens
+        # The first request has all num_tokens tokens, all other requests have no tokens
         req_infos = [
             ReqInfo(
                 rid=str(i),
-                origin_input_ids=[1] + (i == 0) * (num_tokens - num_reqs) * [0],
+                origin_input_ids=(i == 0) * num_tokens * [0],
                 sampling_params=SamplingParams(),
                 stream=False,
             )
