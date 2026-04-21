@@ -142,6 +142,11 @@ def convert_chat_completion_to_internal_request(
         logit_bias=req.logit_bias if req.logit_bias else {},
     )
 
+    # Pull out any text that lives in content parts
+    for message in req.messages:
+        if isinstance(message.content, list):
+            message.content = "".join(part.text for part in message.content)
+
     tokenized_templated_input = (
         raw_request.app.state.tokenizer_manager.tokenizer.apply_chat_template(
             req.messages, tokenize=True, add_generation_prompt=True
