@@ -4,7 +4,11 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch, ModelWorkerBatch
+
+
+class BaseAttentionMetadata:
+    pass
 
 
 class BaseAttentionBackend(ABC, nnx.Module):
@@ -32,8 +36,8 @@ class BaseAttentionBackend(ABC, nnx.Module):
         pass
 
     @abstractmethod
-    def init_forward_metadata(self, forward_batch: ForwardBatch):
-        # Called before the JIT boundary to let each attention backend
+    def get_forward_metadata(self, batch: ModelWorkerBatch) -> BaseAttentionMetadata:
+        # Called during ForwardBatch construction to let each attention backend
         # compute batch-dependent metadata (e.g., static pytree fields that control
         # recompilation) without adding backend-specific fields to ForwardBatch.
         pass

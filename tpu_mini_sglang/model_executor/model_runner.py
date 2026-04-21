@@ -68,10 +68,6 @@ class ModelRunner:
     ) -> GenerationBatchResult:
         forward_batch, sampling_metadata = construct_forward_and_sampling_info(batch, self)
 
-        # We must call this beforehand to make the attention backend aware
-        # of the token->slot mappings for each request
-        self.attn_backend.init_forward_metadata(forward_batch)
-
         # JIT boundary; model_fn is jit compiled
         cache.kv_buffer, full_logits = self.model_fn(cache.kv_buffer, forward_batch)
 

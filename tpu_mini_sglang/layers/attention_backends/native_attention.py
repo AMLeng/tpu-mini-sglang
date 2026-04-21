@@ -1,9 +1,22 @@
+from dataclasses import dataclass, field
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
+from jax.tree_util import register_dataclass
 
-from tpu_mini_sglang.layers.attention_backends.base_attention_backend import BaseAttentionBackend
-from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
+from tpu_mini_sglang.layers.attention_backends.base_attention_backend import (
+    BaseAttentionBackend,
+    BaseAttentionMetadata,
+)
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch, ModelWorkerBatch
+
+
+@register_dataclass
+@dataclass
+class NativeAttentionMetadata(BaseAttentionMetadata):
+    padded_total_num_tokens: int = field(metadata={"static": True})
 
 
 class NativeAttention(BaseAttentionBackend):
@@ -31,6 +44,7 @@ class NativeAttention(BaseAttentionBackend):
         v: jax.Array,  # (num_tokens, num_kv_heads, head_dim)
         forward_batch: ForwardBatch,
     ):
+        assert isinstance(forward_batch.attn_metadata, NativeAttentionMetadata)
         original_kv_shape = kv_cache.shape
 
         # Check that we have as many elements per page as we expect, so that the reshape is valid
@@ -48,7 +62,7 @@ class NativeAttention(BaseAttentionBackend):
         v_cache = kv_cache[:, :, 1]  # (cache_size, num_kv_heads, head_dim)
 
         num_query_tokens = len(forward_batch.input_ids)  # t
-        num_kv_tokens = self.padded_total_num_tokens  # s
+        num_kv_tokens = forward_batch.attn_metadata.padded_total_num_tokens  # s
 
         def make_seq_ids(sequence_lengths: jax.Array, total_padded_length: int):
             # Assign an id to tokens in each sequence, and a shared sequence id for padding tokens
@@ -103,9 +117,11 @@ class NativeAttention(BaseAttentionBackend):
             -1, self.num_heads, self.head_dim
         )
 
-    def init_forward_metadata(self, forward_batch: ForwardBatch):
-        sum_seq_lens: int = jnp.sum(forward_batch.seq_lens).item()
-        PAD_LEN = 256
-        pad_len = (PAD_LEN - (sum_seq_lens % PAD_LEN)) % PAD_LEN
-        # static pytree value that causes recompilation upon change (hence why we pad)
-        self.padded_total_num_tokens = sum_seq_lens + pad_len
+    def get_forward_metadata(self, batch: ModelWorkerBatch) -> NativeAttentionMetadata:
+        sum_seq_lens: int = np.sum(batch.seq_lens).item()
+        next_power_of_2 = 1 << (sum_seq_lens - 1).bit_length()
+
+        return NativeAttentionMetadata(
+            # static pytree value that causes recompilation upon change
+            padded_total_num_tokens=next_power_of_2
+        )

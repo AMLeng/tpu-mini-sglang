@@ -1,19 +1,31 @@
 import functools
+from dataclasses import dataclass
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from jax.tree_util import register_dataclass
 
 from tpu_mini_sglang.kernels.ragged_paged_attention.kernel import ragged_paged_attention
 from tpu_mini_sglang.kernels.ragged_paged_attention.kernel_hd64 import ragged_paged_attention_hd64
-from tpu_mini_sglang.layers.attention_backends.base_attention_backend import BaseAttentionBackend
+from tpu_mini_sglang.layers.attention_backends.base_attention_backend import (
+    BaseAttentionBackend,
+    BaseAttentionMetadata,
+)
 from tpu_mini_sglang.managers.scheduler_struct import (
     ForwardMode,
 )
-from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
+from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch, ModelWorkerBatch
 from tpu_mini_sglang.sharding import RPA_CACHE_SHARDING, ShardingAxisName
+
+
+@register_dataclass
+@dataclass
+class RaggedPagedAttentionMetadata(BaseAttentionMetadata):
+    page_indices: jax.typing.ArrayLike
+    cu_q_lens: jax.typing.ArrayLike
+    distribution: jax.typing.ArrayLike
 
 
 class RaggedPagedAttention(BaseAttentionBackend):
@@ -31,12 +43,6 @@ class RaggedPagedAttention(BaseAttentionBackend):
         self.scaling = original_head_dim**-0.5
         self.page_size = page_size
         self.mesh = mesh
-        self._decode_mask = jax.device_put(
-            np.array([1, 1, 1], dtype=np.int32), device=NamedSharding(self.mesh, P())
-        )
-        self._prefill_mask = jax.device_put(
-            np.array([0, 0, 1], dtype=np.int32), device=NamedSharding(self.mesh, P())
-        )
 
     def __call__(
         self,
@@ -46,6 +52,8 @@ class RaggedPagedAttention(BaseAttentionBackend):
         v: jax.Array,  # (num_tokens, num_kv_heads, head_dim)
         forward_batch: ForwardBatch,
     ):
+        assert isinstance(forward_batch.attn_metadata, RaggedPagedAttentionMetadata)
+        metadata = forward_batch.attn_metadata
         attn_function = (
             ragged_paged_attention_hd64 if self.head_dim == 64 else ragged_paged_attention
         )
@@ -74,9 +82,9 @@ class RaggedPagedAttention(BaseAttentionBackend):
             v,
             kv_cache,
             forward_batch.seq_lens,
-            self.page_indices,
-            self.cu_q_lens,
-            self.distribution,
+            metadata.page_indices,
+            metadata.cu_q_lens,
+            metadata.distribution,
         )
 
         return (
@@ -84,19 +92,24 @@ class RaggedPagedAttention(BaseAttentionBackend):
             attn_output,
         )
 
-    def init_forward_metadata(self, forward_batch: ForwardBatch):
+    def get_forward_metadata(self, batch: ModelWorkerBatch) -> RaggedPagedAttentionMetadata:
         # RPA takes a flattened list of page indices rather than slot indices
-        self.page_indices = forward_batch.req_to_token[..., :: self.page_size] // self.page_size
-        self.page_indices = self.page_indices.reshape(-1)
-        # We pad rather than concatenate to preserve the sharding
-        self.cu_q_lens = jnp.pad(jnp.cumsum(forward_batch.extend_lens), ((1, 0),))
+        page_indices = batch.req_to_token[..., :: self.page_size] // self.page_size
+        page_indices = page_indices.reshape(-1)
 
-        num_seqs = jnp.sum(forward_batch.seq_lens > 0, dtype=jnp.int32)
+        cu_q_lens = np.pad(np.cumsum(batch.extend_lens), ((1, 0),))
+
+        num_seqs = np.sum(batch.seq_lens > 0)
         # The prefill mask will handle any sort of batch;
         # what is important is that all-decode batches get the optimized decode path
         mask = (
-            self._decode_mask
-            if forward_batch.forward_mode == ForwardMode.DECODE
-            else self._prefill_mask
+            np.array([1, 1, 1], dtype=np.int32)
+            if batch.forward_mode == ForwardMode.DECODE
+            else np.array([0, 0, 1], dtype=np.int32)
         )
-        self.distribution = num_seqs * mask
+
+        return RaggedPagedAttentionMetadata(
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            distribution=num_seqs * mask,
+        )

@@ -19,6 +19,7 @@ from tpu_mini_sglang.sampling.sampling_params import TOP_K_ALL
 if TYPE_CHECKING:
     from tpu_mini_sglang.layers.attention_backends.base_attention_backend import (
         BaseAttentionBackend,
+        BaseAttentionMetadata,
     )
     from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 
@@ -144,6 +145,7 @@ class ForwardBatch:
     out_cache_loc: jax.Array
 
     attn_backend: BaseAttentionBackend
+    attn_metadata: BaseAttentionMetadata
 
     extend_lens: jax.Array
 
@@ -154,6 +156,7 @@ def construct_forward_and_sampling_info(batch: ModelWorkerBatch, model_runner: M
     # We construct both the ForwardBatch and SamplingMetadata together
     # so that we can do a single batched jax.device_put
     # We construct arrays on the tpu(s) in a fully replicated way
+    attn_metadata = model_runner.attn_backend.get_forward_metadata(batch)
     (
         jax_input_ids,
         jax_positions,
@@ -165,6 +168,7 @@ def construct_forward_and_sampling_info(batch: ModelWorkerBatch, model_runner: M
         jax_top_p,
         jax_top_k,
         jax_all_greedy,
+        jax_attn_metadata,
     ) = jax.device_put(
         (
             batch.input_ids,
@@ -177,6 +181,7 @@ def construct_forward_and_sampling_info(batch: ModelWorkerBatch, model_runner: M
             batch.top_p,
             batch.top_k,
             batch.all_greedy,
+            attn_metadata,
         ),
         device=NamedSharding(model_runner.mesh, P()),
     )
@@ -190,6 +195,7 @@ def construct_forward_and_sampling_info(batch: ModelWorkerBatch, model_runner: M
             extend_lens=jax_extend_lens,
             out_cache_loc=jax_out_cache_loc,
             attn_backend=model_runner.attn_backend,
+            attn_metadata=jax_attn_metadata,
             forward_mode=batch.forward_mode,
         ),
         SamplingMetadata(
