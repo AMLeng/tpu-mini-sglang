@@ -18,6 +18,7 @@ from tpu_mini_sglang.entrypoints.openai_protocol import (
     ModelCard,
     ModelList,
     convert_chat_completion_to_internal_request,
+    make_oai_error_response,
     oai_format_response,
     oai_format_response_stream,
 )
@@ -55,13 +56,22 @@ async def generate_request(req: GenerateRequest) -> Response:
     """Handle a generate request."""
 
     if not req.stream:
-        response_dict = await app.state.tokenizer_manager.generate_request(req)
-        return JSONResponse(content=response_dict)
+        try:
+            response_dict = await app.state.tokenizer_manager.generate_request(req)
+            return JSONResponse(content=response_dict)
+        except ValueError as e:
+            logger.warning("Error: %s", e)
+            return JSONResponse(content={"error": {"message": str(e)}}, status_code=400)
 
     async def stream_results() -> AsyncIterator[bytes]:
         """Stream the response back to the client as Server-Sent Events (SSE)"""
 
-        async for out in app.state.tokenizer_manager.generate_request_stream(req):
+        try:
+            async for out in app.state.tokenizer_manager.generate_request_stream(req):
+                yield (b"data: " + orjson.dumps(out, option=orjson.OPT_NON_STR_KEYS) + b"\n\n")
+        except ValueError as e:
+            logger.warning("Error: %s", e)
+            out = {"error": {"message": str(e)}}
             yield (b"data: " + orjson.dumps(out, option=orjson.OPT_NON_STR_KEYS) + b"\n\n")
         yield (b"data: [DONE]\n\n")
 
@@ -75,11 +85,19 @@ async def openai_v1_chat_completions(req: ChatCompletionRequest, raw_request: Re
     internal_request = convert_chat_completion_to_internal_request(req, raw_request)
 
     if not req.stream:
-        response_dict = await app.state.tokenizer_manager.generate_request(internal_request)
-        return Response(
-            content=oai_format_response(response_dict, req.model).model_dump_json(),
-            media_type="application/json",
-        )
+        try:
+            response_dict = await app.state.tokenizer_manager.generate_request(internal_request)
+            return Response(
+                content=oai_format_response(response_dict, req.model).model_dump_json(),
+                media_type="application/json",
+            )
+        except ValueError as e:
+            logger.warning("Error: %s", e)
+            return Response(
+                content=make_oai_error_response(e),
+                status_code=400,
+                media_type="application/json",
+            )
 
     return StreamingResponse(
         oai_format_response_stream(

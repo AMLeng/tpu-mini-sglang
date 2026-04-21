@@ -16,6 +16,7 @@ from tpu_mini_sglang.managers.io_struct import (
     TokenizedGenerateRequest,
 )
 from tpu_mini_sglang.model_config import ModelConfig
+from tpu_mini_sglang.sampling.sampling_params import UNLIMITED_NEW_TOKENS
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.utils import get_zmq_socket
 
@@ -77,6 +78,8 @@ class TokenizerManager:
         # Tokenize the request text if not already tokenized
         tokenized_req = self._tokenize_one_request(req)
 
+        self._validate_one_request(tokenized_req)
+
         # Send request to scheduler
         state = self._send_one_request(tokenized_req)
 
@@ -94,6 +97,8 @@ class TokenizerManager:
 
         # Tokenize the request text if not already tokenized
         tokenized_req = self._tokenize_one_request(req)
+
+        self._validate_one_request(tokenized_req)
 
         # Send request to scheduler
         state = self._send_one_request(tokenized_req)
@@ -113,6 +118,22 @@ class TokenizerManager:
             sampling_params=obj.sampling_params,
             stream=obj.stream,
         )
+
+    def _validate_one_request(self, req: TokenizedGenerateRequest) -> None:
+        input_length = len(req.input_ids)
+        max_len = self.max_req_input_length
+        if input_length > max_len:
+            raise ValueError(
+                f"Input ({input_length} tokens) exceeds maximum acceptable input length ({max_len})"
+            )
+        output_length = req.sampling_params.max_new_tokens
+        # If the output is equal to UNLIMITED_NEW_TOKENS, we assume that the caller
+        # just wants us to generate as many tokens as possible
+        if output_length != UNLIMITED_NEW_TOKENS and input_length + output_length > max_len:
+            raise ValueError(
+                f"Requested token count ({input_length} input + {output_length} new) "
+                f"exceeds maximum allowed total length ({max_len})"
+            )
 
     def _send_one_request(self, tokenized_req: TokenizedGenerateRequest) -> ReqState:
         # Synchronous send on async socket; safe because we have unlimited high water mark

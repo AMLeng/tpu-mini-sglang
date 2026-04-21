@@ -8,7 +8,7 @@ from fastapi import Request
 from pydantic import BaseModel, Field
 
 from tpu_mini_sglang.managers.io_struct import GenerateRequest, ResponseDict
-from tpu_mini_sglang.sampling.sampling_params import SamplingParams
+from tpu_mini_sglang.sampling.sampling_params import UNLIMITED_NEW_TOKENS, SamplingParams
 
 ############## Pydantic Models ##############
 
@@ -124,7 +124,27 @@ class ModelList(BaseModel):
     data: list[ModelCard] = Field(default_factory=list)
 
 
+class Error(BaseModel):
+    message: str
+    param: str | None = None
+    type: str
+    code: str | None = None
+
+
+class ErrorResponse(BaseModel):
+    error: Error
+
+
 ############## Conversion Methods ##############
+
+
+def make_oai_error_response(error: ValueError) -> str:
+    return ErrorResponse(
+        error=Error(
+            message=str(error),
+            type="invalid_request_error",
+        ),
+    ).model_dump_json()
 
 
 def convert_chat_completion_to_internal_request(
@@ -132,7 +152,9 @@ def convert_chat_completion_to_internal_request(
 ) -> GenerateRequest:
     # The raw_request is necessary to access the tokenizer_manager from app.state
 
-    max_new_tokens = req.max_completion_tokens if req.max_completion_tokens is not None else 1 << 30
+    max_new_tokens = (
+        req.max_completion_tokens if req.max_completion_tokens is not None else UNLIMITED_NEW_TOKENS
+    )
     sampling_params = SamplingParams(
         max_new_tokens=max_new_tokens,
         temperature=req.temperature,
@@ -188,49 +210,57 @@ async def oai_format_response_stream(
     is_first = True
     finish_reason_type = None
     stream_buffer = ""
-    async for content in response_stream:
-        # We do not support parallel sampling; the index is always 0
-        index = 0
-        if content["meta_info"]["finish_reason"] is not None:
-            finish_reason_type = content["meta_info"]["finish_reason"]
+    try:
+        async for content in response_stream:
+            # We do not support parallel sampling; the index is always 0
+            index = 0
+            if content["meta_info"]["finish_reason"] is not None:
+                finish_reason_type = content["meta_info"]["finish_reason"]
 
-        rid = content["meta_info"]["id"]
+            rid = content["meta_info"]["id"]
 
-        # Emit the initial chunk with the role
-        if is_first:
-            is_first = False
-            first_choice = ChatCompletionResponseStreamChoice(
-                delta=ChoiceDelta(role="assistant", content=""),
-                finish_reason=None,
-                index=index,
-            )
-            first_chunk = ChatCompletionChunk(
-                id=rid, created=int(time.time()), choices=[first_choice], model=model_name
-            )
-            yield f"data: {first_chunk.model_dump_json()}\n\n"
+            # Emit the initial chunk with the role
+            if is_first:
+                is_first = False
+                first_choice = ChatCompletionResponseStreamChoice(
+                    delta=ChoiceDelta(role="assistant", content=""),
+                    finish_reason=None,
+                    index=index,
+                )
+                first_chunk = ChatCompletionChunk(
+                    id=rid, created=int(time.time()), choices=[first_choice], model=model_name
+                )
+                yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-        delta = content["text"][len(stream_buffer) :]
-        stream_buffer = content["text"]
+            delta = content["text"][len(stream_buffer) :]
+            stream_buffer = content["text"]
 
-        if delta:
-            choice = ChatCompletionResponseStreamChoice(
-                delta=ChoiceDelta(content=delta), finish_reason=None, index=index
-            )
-            chunk = ChatCompletionChunk(
-                id=rid, created=int(time.time()), choices=[choice], model=model_name
-            )
-            yield f"data: {chunk.model_dump_json()}\n\n"
-
-    # Emit final chunk, using the id from the last round of the loop
-    finish_reason_chunk = ChatCompletionChunk(
-        id=rid,
-        created=int(time.time()),
-        choices=[
-            ChatCompletionResponseStreamChoice(
-                delta=ChoiceDelta(), finish_reason=finish_reason_type, index=index
-            )
-        ],
-        model=model_name,
-    )
-    yield f"data: {finish_reason_chunk.model_dump_json()}\n\n"
+            if delta:
+                choice = ChatCompletionResponseStreamChoice(
+                    delta=ChoiceDelta(content=delta), finish_reason=None, index=index
+                )
+                chunk = ChatCompletionChunk(
+                    id=rid, created=int(time.time()), choices=[choice], model=model_name
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+        # Emit final chunk, using the id from the last round of the loop
+        finish_reason_chunk = ChatCompletionChunk(
+            id=rid,
+            created=int(time.time()),
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    delta=ChoiceDelta(), finish_reason=finish_reason_type, index=index
+                )
+            ],
+            model=model_name,
+        )
+        yield f"data: {finish_reason_chunk.model_dump_json()}\n\n"
+    except ValueError as e:
+        error_response = ErrorResponse(
+            error=Error(
+                message=str(e),
+                type="invalid_request_error",
+            ),
+        )
+        yield f"data: {error_response.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
