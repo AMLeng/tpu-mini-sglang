@@ -2,6 +2,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
 
@@ -9,14 +10,16 @@ from tpu_mini_sglang.layers.attention_backends.base_attention_backend import Bas
 from tpu_mini_sglang.layers.attention_backends.native_attention import NativeAttention
 from tpu_mini_sglang.layers.attention_backends.ragged_paged_attention import RaggedPagedAttention
 from tpu_mini_sglang.layers.sampler import Sampler, get_jitted_sampler
-from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
     ForwardMode,
     GenerationBatchResult,
 )
-from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
+from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool
 from tpu_mini_sglang.model_config import ModelConfig
-from tpu_mini_sglang.model_executor.forward_batch_info import construct_forward_and_sampling_batches
+from tpu_mini_sglang.model_executor.forward_batch_info import (
+    ModelWorkerBatch,
+    construct_forward_and_sampling_info,
+)
 from tpu_mini_sglang.models.model_loader import get_jitted_model
 from tpu_mini_sglang.server_args import ServerArgs
 from tpu_mini_sglang.utils import approximate_model_size, get_paddings
@@ -61,9 +64,9 @@ class ModelRunner:
         self._decode_paddings = [(x, x) for x in _req_paddings]
 
     def forward_batch_generation(
-        self, cache: MHATokenToKVPool, batch: ScheduleBatch
+        self, cache: MHATokenToKVPool, batch: ModelWorkerBatch
     ) -> GenerationBatchResult:
-        forward_batch, sampling_metadata = construct_forward_and_sampling_batches(batch, self)
+        forward_batch, sampling_metadata = construct_forward_and_sampling_info(batch, self)
 
         # We must call this beforehand to make the attention backend aware
         # of the token->slot mappings for each request
@@ -81,7 +84,7 @@ class ModelRunner:
         )
 
         # We use take :len(reqs) to only get the ids for real (non padding) sequences
-        next_token_ids = next_token_ids[: len(batch.reqs)]
+        next_token_ids = next_token_ids[: sum(batch.seq_lens > 0)]
 
         return GenerationBatchResult(next_token_ids=next_token_ids.tolist())
 
@@ -152,31 +155,27 @@ class ModelRunner:
         total_toks, total_reqs = padding
         return total_toks - num_tokens, total_reqs - num_reqs
 
-    def precompile(self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool) -> None:
+    def precompile(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         # Mixed batches will be treated the same as prefill
-        self._precompile_prefill(cache=cache, req_to_token_pool=req_to_token_pool)
-        self._precompile_decode(cache=cache, req_to_token_pool=req_to_token_pool)
+        self._precompile_prefill(cache=cache, req_to_token=req_to_token)
+        self._precompile_decode(cache=cache, req_to_token=req_to_token)
 
-    def _precompile_prefill(
-        self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool
-    ) -> None:
+    def _precompile_prefill(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         for num_tokens, num_reqs in self._prefill_paddings:
-            synthetic_batch = ScheduleBatch.generate_synthetic(
+            synthetic_batch = ModelWorkerBatch.generate_synthetic(
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 forward_mode=ForwardMode.PREFILL,
-                req_to_token_pool=req_to_token_pool,
+                req_to_token=req_to_token,
             )
             self.forward_batch_generation(cache=cache, batch=synthetic_batch)
 
-    def _precompile_decode(
-        self, cache: MHATokenToKVPool, req_to_token_pool: ReqToTokenPool
-    ) -> None:
+    def _precompile_decode(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         for num_tokens, num_reqs in self._decode_paddings:
-            synthetic_batch = ScheduleBatch.generate_synthetic(
+            synthetic_batch = ModelWorkerBatch.generate_synthetic(
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 forward_mode=ForwardMode.DECODE,
-                req_to_token_pool=req_to_token_pool,
+                req_to_token=req_to_token,
             )
             self.forward_batch_generation(cache=cache, batch=synthetic_batch)

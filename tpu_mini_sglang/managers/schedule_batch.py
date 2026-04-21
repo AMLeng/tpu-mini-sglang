@@ -10,13 +10,10 @@ from tpu_mini_sglang.managers.scheduler_struct import (
     PrefillReqState,
     PreparedReqState,
     ProcessedReqState,
-    ReqInfo,
 )
 from tpu_mini_sglang.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
-from tpu_mini_sglang.mem_cache.tree_node import TreeNode
-from tpu_mini_sglang.sampling.sampling_params import SamplingParams
 
 
 @dataclass
@@ -145,54 +142,6 @@ class ScheduleBatch:
             reqs=prepared_reqs,
             out_cache_loc=out_cache_loc,
             forward_mode=ForwardMode.DECODE,
-            req_to_token=req_to_token_pool.req_to_token,
-        )
-
-    @classmethod
-    def generate_synthetic(
-        cls,
-        num_tokens: int,
-        num_reqs: int,
-        forward_mode: ForwardMode,
-        req_to_token_pool: ReqToTokenPool,
-    ):
-        dummy_node = TreeNode(
-            key=[],
-            value=np.array([], dtype=int),
-            parent=None,
-            children={},
-            lock_count=0,
-            last_access_time=0,
-        )
-        # The first request has all num_tokens tokens, all other requests have no tokens
-        req_infos = [
-            ReqInfo(
-                rid=str(i),
-                origin_input_ids=(i == 0) * num_tokens * [0],
-                sampling_params=SamplingParams(),
-                stream=False,
-            )
-            for i in range(num_reqs)
-        ]
-
-        prepared_reqs = [
-            PreparedReqState(
-                req_info=req_info,
-                req_pool_idx=i,
-                extend_len=len(req_info.origin_input_ids),
-                last_node=dummy_node,  # Should never be used by anything
-                tree_matched_len=0,  # Should never be used by anything
-                prefill_unfinished=False,  # Should never be used by anything
-            )
-            for i, req_info in enumerate(req_infos)
-        ]
-
-        total_extend_len = sum(r.extend_len for r in prepared_reqs)
-        # We use np.zeros because the 0 cache location is for writing padding/trash
-        return cls(
-            reqs=prepared_reqs,
-            out_cache_loc=np.zeros((total_extend_len,), dtype=np.int32),
-            forward_mode=forward_mode,
             req_to_token=req_to_token_pool.req_to_token,
         )
 

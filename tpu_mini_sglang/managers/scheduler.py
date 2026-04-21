@@ -26,6 +26,7 @@ from tpu_mini_sglang.mem_cache.allocator import PagedTokenToKVPoolAllocator, Tok
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 from tpu_mini_sglang.model_config import ModelConfig
+from tpu_mini_sglang.model_executor.forward_batch_info import ModelWorkerBatch
 from tpu_mini_sglang.model_executor.model_runner import ModelRunner
 from tpu_mini_sglang.server_args import PortArgs, ServerArgs
 from tpu_mini_sglang.sharding import create_device_mesh
@@ -87,7 +88,7 @@ class Scheduler:
         # Warmups to force JIT precompilation for different token/req batch sizes
         if not self.server_args.skip_scheduler_warmup:
             logger.info("Beginning precompile")
-            self.model_runner.precompile(self.kv_cache, self.req_to_token_pool)
+            self.model_runner.precompile(self.kv_cache, self.req_to_token_pool.req_to_token)
             logger.info("Finished precompile")
             activate_jax_log_compiles(function_names=["apply_sampler", "apply_model"])
 
@@ -186,7 +187,8 @@ class Scheduler:
         return None
 
     def _run_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
-        return self.model_runner.forward_batch_generation(self.kv_cache, batch)
+        model_worker_batch = ModelWorkerBatch.init_new(batch, self.model_runner)
+        return self.model_runner.forward_batch_generation(self.kv_cache, model_worker_batch)
 
     def _process_batch_result(
         self, batch: ScheduleBatch, result: GenerationBatchResult
