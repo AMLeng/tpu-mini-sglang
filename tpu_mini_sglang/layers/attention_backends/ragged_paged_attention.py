@@ -3,7 +3,8 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_mini_sglang.kernels.ragged_paged_attention.kernel import ragged_paged_attention
 from tpu_mini_sglang.kernels.ragged_paged_attention.kernel_hd64 import ragged_paged_attention_hd64
@@ -31,10 +32,10 @@ class RaggedPagedAttention(BaseAttentionBackend):
         self.page_size = page_size
         self.mesh = mesh
         self._decode_mask = jax.device_put(
-            np.array([1, 1, 1], dtype=np.int32), device=NamedSharding(self.mesh, PartitionSpec())
+            np.array([1, 1, 1], dtype=np.int32), device=NamedSharding(self.mesh, P())
         )
         self._prefill_mask = jax.device_put(
-            np.array([0, 0, 1], dtype=np.int32), device=NamedSharding(self.mesh, PartitionSpec())
+            np.array([0, 0, 1], dtype=np.int32), device=NamedSharding(self.mesh, P())
         )
 
     def __call__(
@@ -53,17 +54,17 @@ class RaggedPagedAttention(BaseAttentionBackend):
             functools.partial(attn_function, sm_scale=self.scaling),
             mesh=self.mesh,
             in_specs=(
-                PartitionSpec(None, ShardingAxisName.ATTN_HEAD, None),
-                PartitionSpec(None, ShardingAxisName.ATTN_HEAD, None),
-                PartitionSpec(None, ShardingAxisName.ATTN_HEAD, None),
+                P(None, ShardingAxisName.ATTN_HEAD, None),
+                P(None, ShardingAxisName.ATTN_HEAD, None),
+                P(None, ShardingAxisName.ATTN_HEAD, None),
                 RPA_CACHE_SHARDING,
-                PartitionSpec(None),
-                PartitionSpec(None),
-                PartitionSpec(None),
-                PartitionSpec(None),
+                P(None),
+                P(None),
+                P(None),
+                P(None),
             ),
             out_specs=(
-                PartitionSpec(None, ShardingAxisName.ATTN_HEAD, None),
+                P(None, ShardingAxisName.ATTN_HEAD, None),
                 RPA_CACHE_SHARDING,
             ),
             check_vma=False,

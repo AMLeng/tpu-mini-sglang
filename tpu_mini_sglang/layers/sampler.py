@@ -3,7 +3,8 @@ from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_mini_sglang.layers.binary_search import topk_mask, topp_mask
 from tpu_mini_sglang.sampling.sampling_batch_info import SamplingMetadata
@@ -26,7 +27,7 @@ class Sampler(nnx.Module):
         def _do_sampling(logits: jax.Array):
             # Force unsharding on vocab axis, as required for efficient top_p/top_k masking
             logits = jax.lax.with_sharding_constraint(
-                logits, NamedSharding(self.mesh, PartitionSpec(None, None))
+                logits, NamedSharding(self.mesh, P(None, None))
             )
 
             # This sampling order diverges from CUDA SGLang

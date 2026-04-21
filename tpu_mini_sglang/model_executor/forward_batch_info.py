@@ -3,7 +3,8 @@ from typing import TYPE_CHECKING
 
 import jax
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_dataclass
 
 from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
@@ -114,7 +115,7 @@ def construct_forward_and_sampling_batches(batch: ScheduleBatch, model_runner: M
             np.asarray(top_k + batch_pad_len * [TOP_K_ALL], dtype=np.int32),
             np.asarray(all(tk == 1 for tk in top_k), dtype=np.bool),
         ),
-        device=NamedSharding(model_runner.mesh, PartitionSpec()),
+        device=NamedSharding(model_runner.mesh, P()),
     )
 
     return (
