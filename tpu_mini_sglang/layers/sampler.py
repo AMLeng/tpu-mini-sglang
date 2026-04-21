@@ -44,7 +44,7 @@ class Sampler(nnx.Module):
             return next_token_ids
 
         # We use jax.lax.cond so that both branches are compiled during warmup
-        return jax.lax.cond(sampling_metadata.do_greedy, _do_greedy, _do_sampling, logits)
+        return jax.lax.cond(sampling_metadata.all_greedy, _do_greedy, _do_sampling, logits)
 
 
 def get_jitted_sampler(graphdef) -> Callable:

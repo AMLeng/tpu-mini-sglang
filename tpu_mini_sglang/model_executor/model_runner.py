@@ -16,7 +16,7 @@ from tpu_mini_sglang.managers.scheduler_struct import (
 )
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from tpu_mini_sglang.model_config import ModelConfig
-from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
+from tpu_mini_sglang.model_executor.forward_batch_info import construct_forward_and_sampling_batches
 from tpu_mini_sglang.models.model_loader import get_jitted_model
 from tpu_mini_sglang.server_args import ServerArgs
 from tpu_mini_sglang.utils import approximate_model_size, get_paddings
@@ -63,7 +63,7 @@ class ModelRunner:
     def forward_batch_generation(
         self, cache: MHATokenToKVPool, batch: ScheduleBatch
     ) -> GenerationBatchResult:
-        forward_batch = ForwardBatch.init_new(batch, self)
+        forward_batch, sampling_metadata = construct_forward_and_sampling_batches(batch, self)
 
         # We must call this beforehand to make the attention backend aware
         # of the token->slot mappings for each request
@@ -77,7 +77,7 @@ class ModelRunner:
 
         # Unlike the model, the sampler is stateful (nnx.Rngs) so we need to update the state
         self.sampler_state, next_token_ids = self.sampler_fn(
-            self.sampler_state, logits, forward_batch.sampling_metadata
+            self.sampler_state, logits, sampling_metadata
         )
 
         # We use take :len(reqs) to only get the ids for real (non padding) sequences

@@ -8,6 +8,7 @@ from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 
 
 class BaseAttentionBackend(ABC, nnx.Module):
+    @abstractmethod
     def __init__(
         self,
         num_heads: int,
@@ -17,15 +18,7 @@ class BaseAttentionBackend(ABC, nnx.Module):
         page_size: int,
         mesh: Mesh,
     ):
-        # static pytree values
-        self.num_heads = num_heads  # n
-        self.num_kv_heads = num_kv_heads  # k
-        self.num_groups = num_heads // num_kv_heads  # g
-        self.original_head_dim = original_head_dim
-        self.head_dim = head_dim  # h
-        self.scaling = self.original_head_dim**-0.5
-        self.page_size = page_size
-        self.mesh = mesh
+        pass
 
     @abstractmethod
     def __call__(

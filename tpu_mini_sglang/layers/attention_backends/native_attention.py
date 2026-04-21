@@ -1,11 +1,28 @@
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 from tpu_mini_sglang.layers.attention_backends.base_attention_backend import BaseAttentionBackend
 from tpu_mini_sglang.model_executor.forward_batch_info import ForwardBatch
 
 
 class NativeAttention(BaseAttentionBackend):
+    def __init__(
+        self,
+        num_heads: int,
+        original_head_dim: int,
+        head_dim: int,
+        num_kv_heads: int,
+        page_size: int,
+        mesh: Mesh,
+    ):
+        # static pytree values
+        self.num_heads = num_heads  # n
+        self.num_kv_heads = num_kv_heads  # k
+        self.num_groups = num_heads // num_kv_heads  # g
+        self.head_dim = head_dim  # h
+        self.scaling = original_head_dim**-0.5
+
     def __call__(
         self,
         kv_cache: jax.Array,

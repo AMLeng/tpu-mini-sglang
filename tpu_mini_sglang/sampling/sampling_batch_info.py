@@ -10,6 +10,6 @@ class SamplingMetadata:
     temperature: jax.Array
     top_p: jax.Array
     top_k: jax.Array
-    # If do_greedy was marked static, since SamplingMetadata lives on the forward batch,
-    # changing it would cause recompilation of both the sampler *and* the model
-    do_greedy: bool  # Not marked static, so will get converted to a scalar jax array
+    # all_greedy is a scalar jax array; it cannot be a static bool, since then
+    # changing it would cause recompilation (of both the sampler and the model)
+    all_greedy: jax.Array
