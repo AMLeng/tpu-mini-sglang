@@ -70,13 +70,17 @@ class ScheduleBatch:
         # Created in parallel to prepared_reqs
         prefix_lens = np.asarray([len(r.prefix_indices) for r in need_req_slot + chunked_reqs])
 
+        # Correct formula since the prefix must be page-aligned
+        extend_lens = np.asarray([r.extend_len for r in prepared_reqs])
+        required_pages = np.sum(
+            (extend_lens + token_to_kv_pool_allocator.page_size - 1)
+            // token_to_kv_pool_allocator.page_size
+        ).item()
         # Allocate actual cache
-        total_extend_len = sum(r.extend_len for r in prepared_reqs)
-        tree_cache.ensure_free_size(total_extend_len)
+        tree_cache.ensure_free_size(required_pages * token_to_kv_pool_allocator.page_size)
         if token_to_kv_pool_allocator.page_size == 1:
-            out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+            out_cache_loc = token_to_kv_pool_allocator.alloc(np.sum(extend_lens).item())
         else:
-            extend_lens = np.asarray([r.extend_len for r in prepared_reqs])
             out_cache_loc = token_to_kv_pool_allocator.alloc_prefill(
                 prefix_lens=prefix_lens,
                 seq_lens=prefix_lens + extend_lens,
@@ -114,20 +118,22 @@ class ScheduleBatch:
         tree_cache: RadixCache,
     ) -> Self:
         prepared_reqs = [PreparedReqState.init_decode_req(r) for r in reqs]
-        total_extend_len = sum(r.extend_len for r in prepared_reqs)
 
         req_pool_indices = np.asarray([r.req_pool_idx for r in prepared_reqs])
         seq_lens = np.asarray(
             [len(r.req_info.origin_input_ids) + len(r.output_ids) for r in prepared_reqs]
         )
+        # Implicitly assumes extend_len == 1
+        # The new, uncached token is at position seq_lens - 1
+        required_pages = np.sum((seq_lens - 1) % token_to_kv_pool_allocator.page_size == 0).item()
 
         # Allocate actual cache
-        tree_cache.ensure_free_size(total_extend_len)
+        tree_cache.ensure_free_size(token_to_kv_pool_allocator.page_size * required_pages)
         if token_to_kv_pool_allocator.page_size == 1:
-            out_cache_loc = token_to_kv_pool_allocator.alloc(total_extend_len)
+            out_cache_loc = token_to_kv_pool_allocator.alloc(required_pages)
         else:
             out_cache_loc = token_to_kv_pool_allocator.alloc_decode(
-                prev_cache_loc=req_to_token_pool.req_to_token[req_pool_indices, seq_lens - 2]
+                prev_cache_loc=req_to_token_pool.req_to_token[req_pool_indices, seq_lens - 2],
             )
         if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")
