@@ -128,7 +128,7 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         next_cache_loc = prev_cache_loc + 1
         needs_new_page = np.mod(next_cache_loc, self.page_size) == 0
         need_size = np.sum(needs_new_page).item()
-        if need_size > self.available_size():
+        if need_size * self.page_size > self.available_size():
             return None
         if need_size == 0:
             return next_cache_loc
