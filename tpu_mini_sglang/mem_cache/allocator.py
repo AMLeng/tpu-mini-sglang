@@ -26,6 +26,7 @@ class BaseTokenToKVPoolAllocator:
     def free(self, free_index: np.ndarray):
         # np.concatenate always makes a copy
         pages_to_free = free_index // self.page_size
+        assert np.all(pages_to_free != 0)
         self.free_pages = np.concatenate([self.free_pages, np.unique(pages_to_free)])
 
     def alloc(self, need_size: int) -> np.ndarray | None:
@@ -54,6 +55,7 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def free(self, free_index: np.ndarray):
         # np.concatenate always makes a copy
+        assert np.all(free_index != 0)
         self.free_pages = np.concatenate([self.free_pages, free_index])
 
     def alloc(self, need_size: int) -> np.ndarray | None:

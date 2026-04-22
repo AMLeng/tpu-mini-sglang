@@ -200,7 +200,10 @@ class RadixCache:
         )
 
     def cache_unfinished_req(self, req: ProcessedReqState) -> None:
-        token_ids = req.req_info.origin_input_ids + req.output_ids
+        # We call cache_unfinished_req on a processed req that has already had a new token appended
+        # therefore, we must slice the new token off since it does not yet have a KV cache entry
+        # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token
+        token_ids = (req.req_info.origin_input_ids + req.output_ids)[:-1]
         unaligned_token_count = len(token_ids)
         cache_indices = self.req_to_token_pool.read(req.req_pool_idx, unaligned_token_count)
 
@@ -230,7 +233,10 @@ class RadixCache:
         req.tree_matched_len = len(new_indices)
 
     def cache_finished_req(self, req: ProcessedReqState) -> None:
-        token_ids = req.req_info.origin_input_ids + req.output_ids
+        # We call cache_finished_req on a processed req that has already had a new token appended
+        # therefore, we must slice the new token off since it does not yet have a KV cache entry
+        # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token
+        token_ids = (req.req_info.origin_input_ids + req.output_ids)[:-1]
         unaligned_token_count = len(token_ids)
         cache_indices = self.req_to_token_pool.read(req.req_pool_idx, unaligned_token_count)
 
