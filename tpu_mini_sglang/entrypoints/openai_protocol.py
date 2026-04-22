@@ -54,6 +54,8 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     temperature: float = 0.7
     top_p: float = 1.0
+    top_k: int = -1
+    ignore_eos: bool = False
 
 
 class ChatCompletionMessage(BaseModel):
@@ -159,8 +161,10 @@ def convert_chat_completion_to_internal_request(
         max_new_tokens=max_new_tokens,
         temperature=req.temperature,
         top_p=req.top_p,
+        top_k=req.top_k,
         frequency_penalty=req.frequency_penalty,
         presence_penalty=req.presence_penalty,
+        ignore_eos=req.ignore_eos,
         logit_bias=req.logit_bias if req.logit_bias else {},
     )
 
