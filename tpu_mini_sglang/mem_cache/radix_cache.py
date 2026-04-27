@@ -4,9 +4,7 @@ import time
 import numpy as np
 
 from tpu_mini_sglang.managers.scheduler_struct import (
-    PrefillReqState,
-    PreparedReqState,
-    ProcessedReqState,
+    ReqState,
 )
 from tpu_mini_sglang.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
@@ -157,7 +155,7 @@ class RadixCache:
 
         return rematched_prefix_len, tree_values, current_node
 
-    def cache_chunked_req(self, req: PreparedReqState) -> PrefillReqState:
+    def cache_chunked_req(self, req: ReqState) -> ReqState:
         # Returning the prefix-matched req for further prefill
         # Chunked prefill is always page-aligned except for the final chunk,
         # so this method should never be called on a req with an unaligned tail
@@ -187,19 +185,10 @@ class RadixCache:
         self.inc_lock_count(new_last_node)
         self.dec_lock_count(req.last_node)
 
-        # extend_len and prefill_unfinished will be overwritten by the chunking logic later
-        # Right now we write both values as though we will fully finish prefill the next pass
-        return PrefillReqState(
-            req_info=req.req_info,
-            extend_len=len(req.req_info.origin_input_ids) - len(new_indices),
-            prefix_indices=new_indices,
-            last_node=new_last_node,
-            tree_matched_len=len(new_indices),
-            prefill_unfinished=False,
-            req_pool_idx=req.req_pool_idx,
-        )
+        req.update_cached_prefix(new_last_node=new_last_node, new_indices=new_indices, prefill=True)
+        return req
 
-    def cache_unfinished_req(self, req: ProcessedReqState) -> None:
+    def cache_unfinished_req(self, req: ReqState) -> None:
         # We call cache_unfinished_req on a processed req that has already had a new token appended
         # therefore, we must slice the new token off since it does not yet have a KV cache entry
         # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token
@@ -229,10 +218,11 @@ class RadixCache:
         # Update locks and req state
         self.inc_lock_count(new_last_node)
         self.dec_lock_count(req.last_node)
-        req.last_node = new_last_node
-        req.tree_matched_len = len(new_indices)
+        req.update_cached_prefix(
+            new_last_node=new_last_node, new_indices=new_indices, prefill=False
+        )
 
-    def cache_finished_req(self, req: ProcessedReqState) -> None:
+    def cache_finished_req(self, req: ReqState) -> None:
         # We call cache_finished_req on a processed req that has already had a new token appended
         # therefore, we must slice the new token off since it does not yet have a KV cache entry
         # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token

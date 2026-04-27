@@ -18,9 +18,8 @@ from tpu_mini_sglang.managers.schedule_policy import (
 )
 from tpu_mini_sglang.managers.scheduler_struct import (
     GenerationBatchResult,
-    PrefillReqState,
-    ProcessedReqState,
     ReqInfo,
+    ReqState,
 )
 from tpu_mini_sglang.mem_cache.allocator import PagedTokenToKVPoolAllocator, TokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -61,7 +60,7 @@ class Scheduler:
         # Init running state
         self.waiting_queue: list[ReqInfo] = []
         self.running_decode_batch: ScheduleBatch | None = None
-        self.chunked_req: PrefillReqState | None = None
+        self.chunked_req: ReqState | None = None
 
         # Init model runner
         self.mesh = create_device_mesh(
@@ -207,11 +206,13 @@ class Scheduler:
 
         # Then begin processing all non-chunked reqs
         # Past this point, we should not reference batch any more
-        reqs = [
-            ProcessedReqState.process_req(r, next_token_id, self.model_config.hf_eos_token_id)
-            for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True)
-            if not r.prefill_unfinished
-        ]
+        for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
+            if r.prefill_unfinished:
+                # If r is still in prefill, the generated token is nonsense and we ignore it
+                continue
+            r.add_output_token(next_token_id, self.model_config.hf_eos_token_id)
+
+        reqs = [r for r in batch.reqs if not r.prefill_unfinished]
 
         self._stream_output(reqs)
 
@@ -237,7 +238,7 @@ class Scheduler:
             tree_cache=self.tree_cache,
         )
 
-    def _stream_output(self, reqs: list[ProcessedReqState]) -> None:
+    def _stream_output(self, reqs: list[ReqState]) -> None:
         # Constructs and sends the BatchTokenIDOutput from the requests
         rids = []
         finished_reasons = []
@@ -264,7 +265,7 @@ class Scheduler:
             else:
                 prompt_ids.append([])
             output_ids.append(req.output_ids[req.send_token_offset :])
-            req.send_token_offset = len(req.output_ids)
+            req.mark_streamed()
             prompt_tokens.append(len(req.req_info.origin_input_ids))
             completion_tokens.append(len(req.output_ids))
             cached_tokens.append(0)

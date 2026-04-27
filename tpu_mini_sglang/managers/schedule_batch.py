@@ -7,9 +7,7 @@ import numpy as np
 
 from tpu_mini_sglang.managers.scheduler_struct import (
     ForwardMode,
-    PrefillReqState,
-    PreparedReqState,
-    ProcessedReqState,
+    ReqState,
 )
 from tpu_mini_sglang.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from tpu_mini_sglang.mem_cache.memory_pool import ReqToTokenPool
@@ -23,7 +21,7 @@ class ScheduleBatch:
     # when we construct the ForwardBatch from the ScheduleBatch
     # We now merge the prepare logic into ScheduleBatch, so that a ScheduleBatch is always
     # fully prepared to run and only stale for a brief moment immediately after running
-    reqs: list[PreparedReqState]
+    reqs: list[ReqState]
     out_cache_loc: np.ndarray
 
     forward_mode: ForwardMode
@@ -34,20 +32,22 @@ class ScheduleBatch:
     @classmethod
     def prepare_for_prefill(
         cls,
-        reqs: list[PrefillReqState],
+        reqs: list[ReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         tree_cache: RadixCache,
     ) -> Self:
         # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
 
-        # Only chunked reqs should have a req_pool_idx assigned
-        chunked_reqs = [r for r in reqs if r.req_pool_idx is not None]
+        # Alloc a req_pool_idx to every request which needs one
 
-        need_req_slot = [r for r in reqs if r.req_pool_idx is None]
+        # Requests which already have one should be in chunked prefill
+        need_req_slot = [r for r in reqs if not r.has_req_pool_idx]
         req_pool_indices = req_to_token_pool.alloc(len(need_req_slot))
         if req_pool_indices is None:
             raise RuntimeError("Ran out of running request slots.")
+        for req, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True):
+            req.set_req_pool_idx(req_pool_idx)
 
         # Update req_to_token_pool with our prefix indices for non-chunked reqs
         # Chunked requests already had their prefix indices written previously
@@ -62,25 +62,19 @@ class ScheduleBatch:
                 prefix_indices,
             )
 
-        prepared_reqs = [
-            PreparedReqState.init_prefill_req(r, req_pool_idx)
-            for r, req_pool_idx in zip(need_req_slot, req_pool_indices, strict=True)
-        ] + [PreparedReqState.init_prefill_req_from_chunked(req) for req in chunked_reqs]
-
-        # Created in parallel to prepared_reqs
-        prefix_lens = np.asarray([len(r.prefix_indices) for r in need_req_slot + chunked_reqs])
-
-        # Correct formula since the prefix must be page-aligned
-        extend_lens = np.asarray([r.extend_len for r in prepared_reqs])
+        # Correct formula for required_pages since the prefix must be page-aligned
+        extend_lens = np.asarray([r.extend_len for r in reqs])
         required_pages = np.sum(
             (extend_lens + token_to_kv_pool_allocator.page_size - 1)
             // token_to_kv_pool_allocator.page_size
         ).item()
+
         # Allocate actual cache
         tree_cache.ensure_free_size(required_pages * token_to_kv_pool_allocator.page_size)
         if token_to_kv_pool_allocator.page_size == 1:
             out_cache_loc = token_to_kv_pool_allocator.alloc(np.sum(extend_lens).item())
         else:
+            prefix_lens = np.asarray([len(r.prefix_indices) for r in reqs])
             out_cache_loc = token_to_kv_pool_allocator.alloc_prefill(
                 prefix_lens=prefix_lens,
                 seq_lens=prefix_lens + extend_lens,
@@ -88,22 +82,23 @@ class ScheduleBatch:
         if out_cache_loc is None:
             raise RuntimeError("Ran out of kv cache slots.")
 
-        # Update req_to_token_pool information
+        # Update req_to_token_pool information for the kv cache allocation
         pt = 0
-        for i, req in enumerate(prepared_reqs):
+        for i, req in enumerate(reqs):
             # We use pt to step through out_cache_loc
             # Since out_cache_loc is a flattened list of length total_extend_len
+            prefix_len = len(req.prefix_indices)
             req_to_token_pool.write(
                 (
                     req.req_pool_idx,
-                    slice(prefix_lens[i], prefix_lens[i] + req.extend_len),
+                    slice(prefix_len, prefix_len + req.extend_len),
                 ),
                 out_cache_loc[pt : pt + req.extend_len],
             )
             pt += req.extend_len
 
         return cls(
-            reqs=prepared_reqs,
+            reqs=reqs,
             out_cache_loc=out_cache_loc,
             forward_mode=ForwardMode.PREFILL,
             req_to_token=req_to_token_pool.req_to_token,
@@ -112,17 +107,16 @@ class ScheduleBatch:
     @classmethod
     def prepare_for_decode(
         cls,
-        reqs: list[ProcessedReqState],
+        reqs: list[ReqState],
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         tree_cache: RadixCache,
     ) -> Self:
-        prepared_reqs = [PreparedReqState.init_decode_req(r) for r in reqs]
+        for req in reqs:
+            req.prepare_decode()
 
-        req_pool_indices = np.asarray([r.req_pool_idx for r in prepared_reqs])
-        seq_lens = np.asarray(
-            [len(r.req_info.origin_input_ids) + len(r.output_ids) for r in prepared_reqs]
-        )
+        req_pool_indices = np.asarray([r.req_pool_idx for r in reqs])
+        seq_lens = np.asarray([len(r.req_info.origin_input_ids) + len(r.output_ids) for r in reqs])
         # Implicitly assumes extend_len == 1
         # The new, uncached token is at position seq_lens - 1
         required_pages = np.sum((seq_lens - 1) % token_to_kv_pool_allocator.page_size == 0).item()
@@ -145,7 +139,7 @@ class ScheduleBatch:
         )
 
         return cls(
-            reqs=prepared_reqs,
+            reqs=reqs,
             out_cache_loc=out_cache_loc,
             forward_mode=ForwardMode.DECODE,
             req_to_token=req_to_token_pool.req_to_token,

@@ -2,8 +2,8 @@ from enum import Enum, auto
 
 from tpu_mini_sglang.managers.schedule_batch import ScheduleBatch
 from tpu_mini_sglang.managers.scheduler_struct import (
-    PrefillReqState,
     ReqInfo,
+    ReqState,
 )
 from tpu_mini_sglang.mem_cache.radix_cache import RadixCache
 
@@ -41,7 +41,7 @@ class PrefillAdder:
         # So we track how many chunked reqs are present
         self.chunked_reqs_in_can_run_list = 0
 
-        self.can_run_list: list[PrefillReqState] = []
+        self.can_run_list: list[ReqState] = []
 
     def _ceil_paged_tokens(self, tokens: int):
         return -(-tokens // self.page_size) * self.page_size
@@ -55,7 +55,7 @@ class PrefillAdder:
         self.rem_kv_tokens -= max_new_tokens + extend_len
         self.rem_token_budget -= extend_len
 
-    def try_add_chunked_req(self, chunked_req: PrefillReqState) -> None | PrefillReqState:
+    def try_add_chunked_req(self, chunked_req: ReqState) -> None | ReqState:
         # Add as much of a chunked req as possible, returning the req if it couldn't be added.
         # SGLang unconditionally adds the req, potentially overcommitting the KV cache to do so
         # we instead allow for not running the req and thus letting the decode batch make progress
@@ -82,8 +82,7 @@ class PrefillAdder:
             # the can_run_list will be processed after running the forward batch
             return chunked_req
 
-        chunked_req.extend_len = tokens_to_add
-        chunked_req.prefill_unfinished = truncated
+        chunked_req.set_prefill_extend(tokens_to_add, truncated)
 
         self.can_run_list.append(chunked_req)
         self.chunked_reqs_in_can_run_list += 1
@@ -119,7 +118,7 @@ class PrefillAdder:
             # Non-final chunked prefills should always be page-aligned
             tokens_to_add = self._floor_paged_tokens(tokens_to_add)
 
-        req = PrefillReqState(
+        req = ReqState(
             req_info=req_info,
             extend_len=tokens_to_add,
             prefix_indices=kv_indices,

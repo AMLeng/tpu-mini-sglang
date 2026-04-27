@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
-from typing import Self
 
 import numpy as np
 
@@ -36,8 +35,6 @@ class ForwardMode(IntEnum):
 
 @dataclass(frozen=True)
 class ReqInfo:
-    # Original SGLang uses a single Req class which is mutated in-place many times
-    # I found this hard to follow and refactored
     # ReqInfo contains the immutable input state for a request
     rid: str
     origin_input_ids: list[int]
@@ -46,125 +43,78 @@ class ReqInfo:
 
 
 @dataclass
-class PrefillReqState:
-    # PrefillReqState has information for a prefill request after KV cache prefix matching
+class ReqState:
+    # ReqState contains a bunch of mutable fields; to make this easier to reason about compared
+    # to SGLang, we have the convention that ReqState is only ever mutated by its own methods.
     req_info: ReqInfo
 
-    # kv cache state
-    extend_len: int  # Number of new tokens we will extend the kv cache by
+    # Number of new tokens we will extend the kv cache by; varies in prefill, always 1 in decode
+    extend_len: int
+
+    # information matched from the RadixCache
     prefix_indices: np.ndarray
     last_node: TreeNode
     # Our tree_matched_len corresponds directly to SGLang's cache_protected_len
     tree_matched_len: int  # In sync with last_node; number of tokens matched in the RadixCache
 
-    prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
-    req_pool_idx: int | None = None  # Should be none except for at most one previously chunked req
+    # Only None for a brief time before the first prepare prefill
+    _req_pool_idx: int | None = field(init=False, default=None)
 
-
-@dataclass
-class PreparedReqState:
-    # PreparedReqState is a request in a ScheduleBatch that has been prepared for prefill/decode
-    req_info: ReqInfo
-
-    # kv cache state
-    req_pool_idx: int
-    extend_len: int
-    last_node: TreeNode
-    tree_matched_len: int
-
+    # Prefill-only info
     prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
 
     # Output information
     output_ids: list[int] = field(default_factory=list)
     send_token_offset: int = 0
+    finished_reason: FinishReason | None = None
 
-    @classmethod
-    def init_prefill_req(
-        cls,
-        req: PrefillReqState,
-        req_pool_idx: int,
-    ) -> Self:
-        return cls(
-            req_info=req.req_info,
-            req_pool_idx=req_pool_idx,
-            extend_len=req.extend_len,
-            last_node=req.last_node,
-            tree_matched_len=req.tree_matched_len,
-            prefill_unfinished=req.prefill_unfinished,
-        )
+    @property
+    def has_req_pool_idx(self) -> bool:
+        return self._req_pool_idx is not None
 
-    @classmethod
-    def init_prefill_req_from_chunked(
-        cls,
-        req: PrefillReqState,
-    ) -> Self:
-        assert req.req_pool_idx is not None
-        return cls(
-            req_info=req.req_info,
-            req_pool_idx=req.req_pool_idx,
-            extend_len=req.extend_len,
-            last_node=req.last_node,
-            tree_matched_len=req.tree_matched_len,
-            prefill_unfinished=req.prefill_unfinished,
-        )
+    def set_req_pool_idx(self, req_pool_idx: int):
+        assert self._req_pool_idx is None
+        self._req_pool_idx = req_pool_idx
 
-    @classmethod
-    def init_decode_req(
-        cls,
-        req: ProcessedReqState,
-    ) -> Self:
-        return cls(
-            req_info=req.req_info,
-            req_pool_idx=req.req_pool_idx,
-            extend_len=1,  # Decode always extends by one
-            last_node=req.last_node,
-            tree_matched_len=req.tree_matched_len,
-            prefill_unfinished=False,
-            output_ids=req.output_ids,
-            send_token_offset=req.send_token_offset,
-        )
+    @property
+    def req_pool_idx(self) -> int:
+        assert self._req_pool_idx is not None
+        return self._req_pool_idx
 
+    def set_prefill_extend(self, extend_len: int, prefill_truncated: bool):
+        self.extend_len = extend_len
+        self.prefill_unfinished = prefill_truncated
 
-@dataclass
-class ProcessedReqState:
-    # ProcessedReqState is the result of a request after running through the model
-    req_info: ReqInfo
+    def update_cached_prefix(self, new_last_node: TreeNode, new_indices: np.ndarray, prefill: bool):
+        self.last_node = new_last_node
+        self.tree_matched_len = len(new_indices)
 
-    # kv cache state
-    req_pool_idx: int
-    last_node: TreeNode
-    tree_matched_len: int
+        if prefill:
+            self.prefix_indices = new_indices
+            # extend_len and prefill_unfinished will be overwritten by the chunking logic later
+            # Right now we write both values as though we will fully finish prefill the next pass
+            self.set_prefill_extend(len(self.req_info.origin_input_ids) - len(new_indices), False)
 
-    output_ids: list[int]
-    send_token_offset: int
-    finished_reason: FinishReason | None
+    def prepare_decode(self):
+        self.extend_len = 1
 
-    @classmethod
-    def process_req(cls, req: PreparedReqState, new_token: int, eos_token_ids: set[int]) -> Self:
-        # We mutate the prepared req here, but this is fine since we should never touch it again
-        req.output_ids.append(new_token)
-        obj = cls(
-            req_info=req.req_info,
-            req_pool_idx=req.req_pool_idx,
-            output_ids=req.output_ids,
-            last_node=req.last_node,
-            tree_matched_len=req.tree_matched_len,
-            send_token_offset=req.send_token_offset,
-            finished_reason=None,
-        )
-        info = obj.req_info
+    def add_output_token(self, new_token: int, eos_token_ids: set[int]):
+        self.output_ids.append(new_token)
+        self._check_finished(eos_token_ids)
 
-        # Set finished reason if applicable
+    def _check_finished(self, eos_token_ids: set[int]):
         if (
-            info.sampling_params.max_new_tokens
-            and len(obj.output_ids) >= info.sampling_params.max_new_tokens
+            self.req_info.sampling_params.max_new_tokens
+            and len(self.output_ids) >= self.req_info.sampling_params.max_new_tokens
         ):
-            obj.finished_reason = "length"
-            return obj
-        if not info.sampling_params.ignore_eos and obj.output_ids[-1] in eos_token_ids:
-            obj.finished_reason = "stop"
-            return obj
-        return obj
+            self.finished_reason = "length"
+            return
+        if not self.req_info.sampling_params.ignore_eos and self.output_ids[-1] in eos_token_ids:
+            self.finished_reason = "stop"
+            return
+
+    def mark_streamed(self) -> None:
+        self.send_token_offset = len(self.output_ids)
 
 
 @dataclass
