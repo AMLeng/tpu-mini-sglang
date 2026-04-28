@@ -51,6 +51,13 @@ class ReqState:
     # Number of new tokens we will extend the kv cache by; varies in prefill, always 1 in decode
     extend_len: int
 
+    # Input ids corresponding to allocated kv cache slots
+    # That invariant should be valid everywhere outside of prepare for prefill/decode
+    # Can be shorter than origin_input_ids during chunked prefill
+    # Can be different from origin_input_ids + output_ids during decode for overlap scheduling,
+    # due to placeholder tokens that are added to kv_token_ids but not to output_ids
+    kv_token_ids: list[int] = field(init=False, default_factory=list)
+
     # information matched from the RadixCache
     prefix_indices: np.ndarray
     last_node: TreeNode
@@ -67,6 +74,7 @@ class ReqState:
     output_ids: list[int] = field(default_factory=list)
     send_token_offset: int = 0
     finished_reason: FinishReason | None = None
+    previously_finished: bool = field(init=False, default=False)
 
     @property
     def has_req_pool_idx(self) -> bool:
@@ -95,14 +103,31 @@ class ReqState:
             # Right now we write both values as though we will fully finish prefill the next pass
             self.set_prefill_extend(len(self.req_info.origin_input_ids) - len(new_indices), False)
 
-    def prepare_decode(self):
+    def prepare_prefill(self):
+        self.kv_token_ids = self.req_info.origin_input_ids[
+            : self.tree_matched_len + self.extend_len
+        ]
+
+    def prepare_decode(self, placeholder_id: int | None = None):
+        if placeholder_id is None:
+            self.kv_token_ids.append(self.output_ids[-1])
+        else:
+            self.kv_token_ids.append(placeholder_id)
         self.extend_len = 1
 
     def add_output_token(self, new_token: int, eos_token_ids: set[int]):
         self.output_ids.append(new_token)
+        if self.kv_token_ids[-1] < 0:
+            # Placeholder was from results of batch N, and inserted in the prepare for N+1.
+            # There will only be one placeholder because we finish processing batch N before
+            # we begin preparing batch N+2.
+            self.kv_token_ids[-1] = new_token
         self._check_finished(eos_token_ids)
 
     def _check_finished(self, eos_token_ids: set[int]):
+        if self.finished_reason is not None:
+            self.previously_finished = True
+            return
         if (
             self.req_info.sampling_params.max_new_tokens
             and len(self.output_ids) >= self.req_info.sampling_params.max_new_tokens

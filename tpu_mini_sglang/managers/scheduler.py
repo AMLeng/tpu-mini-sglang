@@ -47,6 +47,9 @@ class Scheduler:
 
         self.model_config = ModelConfig.from_server_args(self.server_args)
         self.max_req_len = self.model_config.context_len
+        self.enable_overlap = self.server_args.enable_overlap
+        if self.enable_overlap:
+            self.last_batch: ScheduleBatch | None = None
 
         # Init ZMQ sockets for IPC
         context = zmq.Context(2)  # Creates 2 io threads
@@ -104,7 +107,33 @@ class Scheduler:
             if cur_batch:
                 result = self._run_batch(cur_batch)
                 self._process_batch_result(cur_batch, result)
-                self._finalize_and_merge_last_batch(cur_batch)
+                self._finalize_and_prepare_next_batch(cur_batch)
+
+    def run_event_loop_overlap(self):
+        while True:
+            recv_reqs = self._recv_requests()
+
+            # Any generate requests will be processed and stored in self.waiting_queue
+            self._process_input_requests(recv_reqs)
+
+            # Form batches from requests in self.waiting_queue
+            cur_batch = self._get_next_batch_to_run()
+
+            if cur_batch:
+                cur_result = self._run_batch(cur_batch)
+
+            if self.last_batch is not None:
+                last_result = self.model_runner.resolve_last_result()
+                self._process_batch_result(self.last_batch, last_result)
+
+            if cur_batch:
+                # Ordering matters here; finalize_and_prepare constructs batch N+1,
+                # and we want to have fully finished with batch N-1 first.
+                # This maintains the invariant that we are never more than one batch behind,
+                # ensuring e.g. that requests run only one extra decode pass after finishing.
+                self._finalize_and_prepare_next_batch(cur_batch, cur_result.next_token_ids)
+
+            self.last_batch = cur_batch
 
     def _recv_requests(self):
         """Read from ZMQ socket until there is nothing left"""
@@ -183,12 +212,15 @@ class Scheduler:
         model_worker_batch = ModelWorkerBatch.init_new(batch, self.model_runner)
         return self.model_runner.forward_batch_generation(self.kv_cache, model_worker_batch)
 
-    def _finalize_and_merge_last_batch(self, batch: ScheduleBatch) -> None:
+    def _finalize_and_prepare_next_batch(
+        self, batch: ScheduleBatch, placeholder_ids: list[int] | None = None
+    ) -> None:
         """
         Processing after run_batch which does not require knowing the actual output tokens.
-        In normal scheduling, should be run after process_batch_result so that the unfinished
-        req check looks at the new result token. In overlap scheduling, will run before
-        process_batch_result, and finished_reqs will go through the forward pass an extra time.
+        Runs after process_batch_result so that we know as many output tokens as possible.
+        In overlap scheduling, we will only have the actual output for the previous batch,
+        not the current batch, so we will not know which requests finished in the current
+        batch. We include them in the next batch and do an extra forward pass.
         """
         # Pull out and save the chunked req if present
         chunked_reqs = [r for r in batch.reqs if r.prefill_unfinished]
@@ -196,9 +228,11 @@ class Scheduler:
         if len(chunked_reqs) == 1:
             self.chunked_req = self.tree_cache.cache_chunked_req(chunked_reqs[0])
 
-        unfinished_reqs = [
-            r for r in batch.reqs if not r.prefill_unfinished and r.finished_reason is None
-        ]
+        mask = [not r.prefill_unfinished and r.finished_reason is None for r in batch.reqs]
+        unfinished_reqs = [r for r, keep in zip(batch.reqs, mask, strict=True) if keep]
+        if placeholder_ids is not None:
+            placeholder_ids = [p for p, keep in zip(placeholder_ids, mask, strict=True) if keep]
+
         if len(unfinished_reqs) == 0:
             return
 
@@ -207,6 +241,7 @@ class Scheduler:
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             tree_cache=self.tree_cache,
+            placeholder_ids=placeholder_ids,
         )
         if self.running_decode_batch is not None:
             # Both batches we merge are prepared and ready to run
@@ -226,7 +261,10 @@ class Scheduler:
                 continue
             r.add_output_token(next_token_id, self.model_config.hf_eos_token_id)
 
-        reqs = [r for r in batch.reqs if not r.prefill_unfinished]
+        # Exclude both reqs in chunked prefill, and stale finished requests;
+        # with overlap scheduling, finished requests will go through one more forward pass
+        # after they are finished---these requests should not participate in any more processing
+        reqs = [r for r in batch.reqs if not r.prefill_unfinished and not r.previously_finished]
 
         self._stream_output(reqs)
 
@@ -337,7 +375,10 @@ def run_scheduler_process(server_args: ServerArgs, port_args: PortArgs, pipe_wri
         scheduler_data = {"status": "ready", "max_req_input_len": scheduler.max_req_len - 5}
         pipe_writer.send(scheduler_data)
 
-        scheduler.run_event_loop()
+        if scheduler.enable_overlap:
+            scheduler.run_event_loop_overlap()
+        else:
+            scheduler.run_event_loop()
     except Exception:
         traceback = get_exception_traceback()
         logger.error("Scheduler hit an exception: %s", traceback)

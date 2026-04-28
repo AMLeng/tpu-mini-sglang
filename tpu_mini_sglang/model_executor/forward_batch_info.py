@@ -57,7 +57,7 @@ class ModelWorkerBatch:
         # Gather request information together
         for req in batch.reqs:
             # Slice ids and positions to only include the uncached portion
-            full_ids = req.req_info.origin_input_ids + req.output_ids
+            full_ids = req.kv_token_ids
             full_positions = range(len(full_ids))
             req_ids = full_ids[-req.extend_len :]
             req_positions = full_positions[-req.extend_len :]

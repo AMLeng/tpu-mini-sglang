@@ -33,6 +33,7 @@ class ServerArgs:
     max_context_len: int | None = None
     max_num_batched_tokens: int = 8192
     max_num_batched_requests: int = 256
+    enable_overlap: bool = True
     skip_scheduler_warmup: bool = False  # If set, skip JIT precompilation/Scheduler warmup
 
     # Profiling

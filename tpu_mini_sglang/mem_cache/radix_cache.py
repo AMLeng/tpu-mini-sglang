@@ -192,7 +192,7 @@ class RadixCache:
         # We call cache_unfinished_req on a processed req that has already had a new token appended
         # therefore, we must slice the new token off since it does not yet have a KV cache entry
         # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token
-        token_ids = (req.req_info.origin_input_ids + req.output_ids)[:-1]
+        token_ids = req.kv_token_ids
         unaligned_token_count = len(token_ids)
         cache_indices = self.req_to_token_pool.read(req.req_pool_idx, unaligned_token_count)
 
@@ -226,14 +226,20 @@ class RadixCache:
         # We call cache_finished_req on a processed req that has already had a new token appended
         # therefore, we must slice the new token off since it does not yet have a KV cache entry
         # SGLang store kv_committed_len instead, also handling how spec dec can generate >1 token
-        token_ids = (req.req_info.origin_input_ids + req.output_ids)[:-1]
+        token_ids = req.kv_token_ids
         unaligned_token_count = len(token_ids)
         cache_indices = self.req_to_token_pool.read(req.req_pool_idx, unaligned_token_count)
 
-        # We cannot cache loose tokens that don't form a full cache page
-        aligned_token_count = unaligned_token_count - (unaligned_token_count % self.page_size)
+        real_token_count = len(req.req_info.origin_input_ids) + len(req.output_ids)
+
+        # For a finished req, any tokens beyond real_token_count must be fake ids,
+        # e.g. for overlap scheduling, and are to be ignored and not cached.
+        # Furthermore, we cannot cache loose tokens that don't form a full cache page
+        # The below computes the count of page-aligned real tokens
+        cacheable_token_count = real_token_count - (real_token_count % self.page_size)
+
         rematched_prefix_len, new_indices, new_last_node = self._insert(
-            token_ids[:aligned_token_count], cache_indices[:aligned_token_count]
+            token_ids[:cacheable_token_count], cache_indices[:cacheable_token_count]
         )
 
         # We must free [tree_matched_len:rematched_prefix_len], since those are tokens which
@@ -245,9 +251,8 @@ class RadixCache:
             cache_indices[req.tree_matched_len : rematched_prefix_len]
         )
 
-        # For finished reqs, we can't store the unaligned tail in the tree and must just free it
         self.token_to_kv_pool_allocator.free(
-            cache_indices[aligned_token_count:unaligned_token_count]
+            cache_indices[cacheable_token_count:unaligned_token_count]
         )
 
         # Update locks and req state

@@ -39,8 +39,10 @@ class ScheduleBatch:
     ) -> Self:
         # Allocates and writes KV and ReqToTokenPool caches, creates ScheduleBatch
 
-        # Alloc a req_pool_idx to every request which needs one
+        for req in reqs:
+            req.prepare_prefill()
 
+        # Alloc a req_pool_idx to every request which needs one
         # Requests which already have one should be in chunked prefill
         need_req_slot = [r for r in reqs if not r.has_req_pool_idx]
         req_pool_indices = req_to_token_pool.alloc(len(need_req_slot))
@@ -111,12 +113,18 @@ class ScheduleBatch:
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         tree_cache: RadixCache,
+        placeholder_ids: list[int] | None,  # If present, should have length equal to reqs
     ) -> Self:
-        for req in reqs:
-            req.prepare_decode()
+        if placeholder_ids is None:
+            for req in reqs:
+                req.prepare_decode()
+        else:
+            for req, placeholder_id in zip(reqs, placeholder_ids, strict=True):
+                req.prepare_decode(placeholder_id)
 
         req_pool_indices = np.asarray([r.req_pool_idx for r in reqs])
-        seq_lens = np.asarray([len(r.req_info.origin_input_ids) + len(r.output_ids) for r in reqs])
+        seq_lens = np.asarray([len(r.kv_token_ids) for r in reqs])
+
         # Implicitly assumes extend_len == 1
         # The new, uncached token is at position seq_lens - 1
         required_pages = np.sum((seq_lens - 1) % token_to_kv_pool_allocator.page_size == 0).item()

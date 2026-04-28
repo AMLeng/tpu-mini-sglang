@@ -205,3 +205,13 @@ def reshape_and_pad_weight(pad_axis: int, target_shape: tuple[int, ...], weight:
     out = jnp.pad(unpadded_weight, pad_spec)
     assert out.shape == tuple(target_shape)
     return out
+
+
+@jax.jit
+def resolve_future_token_ids(input_ids: jax.Array, future_ids_map: jax.Array) -> jax.Array:
+    return jnp.where(input_ids < 0, future_ids_map[jnp.clip(-input_ids, min=0)], input_ids)
+
+
+@jax.jit
+def set_future_token_ids(token_ids: jax.Array, future_ids_map: jax.Array) -> jax.Array:
+    return jax.lax.dynamic_update_slice(future_ids_map, token_ids, (1,))
