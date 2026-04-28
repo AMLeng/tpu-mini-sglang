@@ -103,14 +103,8 @@ class Scheduler:
 
             if cur_batch:
                 result = self._run_batch(cur_batch)
-                new_decode_batch = self._process_batch_result(cur_batch, result)
-                if new_decode_batch is None:
-                    continue
-                if self.running_decode_batch:
-                    # Both batches we merge are prepared and ready to run
-                    self.running_decode_batch.merge_batch(new_decode_batch)
-                else:
-                    self.running_decode_batch = new_decode_batch
+                self._process_batch_result(cur_batch, result)
+                self._finalize_and_merge_last_batch(cur_batch)
 
     def _recv_requests(self):
         """Read from ZMQ socket until there is nothing left"""
@@ -189,23 +183,43 @@ class Scheduler:
         model_worker_batch = ModelWorkerBatch.init_new(batch, self.model_runner)
         return self.model_runner.forward_batch_generation(self.kv_cache, model_worker_batch)
 
-    def _process_batch_result(
-        self, batch: ScheduleBatch, result: GenerationBatchResult
-    ) -> ScheduleBatch | None:
+    def _finalize_and_merge_last_batch(self, batch: ScheduleBatch) -> None:
         """
-        First, use the GenerationBatchResult to update batch.reqs.
-        Then, use the updated batch.reqs to send BatchTokenIDOutput to the detokenizer.
-        Finally, remove finished requests and free kv cache
+        Processing after run_batch which does not require knowing the actual output tokens.
+        In normal scheduling, should be run after process_batch_result so that the unfinished
+        req check looks at the new result token. In overlap scheduling, will run before
+        process_batch_result, and finished_reqs will go through the forward pass an extra time.
         """
-
         # Pull out and save the chunked req if present
         chunked_reqs = [r for r in batch.reqs if r.prefill_unfinished]
         assert len(chunked_reqs) + int(self.chunked_req is not None) <= 1
         if len(chunked_reqs) == 1:
             self.chunked_req = self.tree_cache.cache_chunked_req(chunked_reqs[0])
 
-        # Then begin processing all non-chunked reqs
-        # Past this point, we should not reference batch any more
+        unfinished_reqs = [
+            r for r in batch.reqs if not r.prefill_unfinished and r.finished_reason is None
+        ]
+        if len(unfinished_reqs) == 0:
+            return
+
+        new_decode_batch = ScheduleBatch.prepare_for_decode(
+            reqs=unfinished_reqs,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            tree_cache=self.tree_cache,
+        )
+        if self.running_decode_batch is not None:
+            # Both batches we merge are prepared and ready to run
+            self.running_decode_batch.merge_batch(new_decode_batch)
+        else:
+            self.running_decode_batch = new_decode_batch
+
+    def _process_batch_result(self, batch: ScheduleBatch, result: GenerationBatchResult) -> None:
+        """
+        Processing after run_batch which requires knowing the actual output tokens.
+        """
+
+        # Process all reqs that have finished prefill
         for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
             if r.prefill_unfinished:
                 # If r is still in prefill, the generated token is nonsense and we ignore it
@@ -227,16 +241,6 @@ class Scheduler:
             self.req_to_token_pool.free(req_pool_indices)  # Must happen after we cache reqs
             for req in unfinished_reqs:
                 self.tree_cache.cache_unfinished_req(req)
-
-        if len(unfinished_reqs) == 0:
-            return None
-
-        return ScheduleBatch.prepare_for_decode(
-            reqs=unfinished_reqs,
-            req_to_token_pool=self.req_to_token_pool,
-            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            tree_cache=self.tree_cache,
-        )
 
     def _stream_output(self, reqs: list[ReqState]) -> None:
         # Constructs and sends the BatchTokenIDOutput from the requests
