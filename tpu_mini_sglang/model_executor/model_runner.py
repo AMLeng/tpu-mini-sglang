@@ -20,10 +20,12 @@ from tpu_mini_sglang.managers.scheduler_struct import (
 from tpu_mini_sglang.mem_cache.memory_pool import MHATokenToKVPool
 from tpu_mini_sglang.model_config import ModelConfig
 from tpu_mini_sglang.model_executor.forward_batch_info import (
+    ForwardBatch,
     ModelWorkerBatch,
     construct_forward_and_sampling_info,
 )
 from tpu_mini_sglang.models.model_loader import get_jitted_model
+from tpu_mini_sglang.sampling.sampling_batch_info import SamplingMetadata
 from tpu_mini_sglang.server_args import ServerArgs
 from tpu_mini_sglang.utils import (
     approximate_model_size,
@@ -105,25 +107,27 @@ class ModelRunner:
     def forward_batch_generation(
         self, cache: MHATokenToKVPool, batch: ModelWorkerBatch
     ) -> GenerationBatchResult:
+        true_batch_len = sum(batch.seq_lens > 0)
+        forward_batch, sampling_metadata = construct_forward_and_sampling_info(batch, self)
+
         if self.enable_overlap:
-            self.input_queue.put((cache, batch))
+            self.input_queue.put((cache, forward_batch, sampling_metadata, true_batch_len))
             # We use negative token ids to show that these are placeholders
             # which double as indices into future_token_ids_map
-            true_batch_len = sum(batch.seq_lens > 0)
             next_token_ids = -1 - np.arange(true_batch_len, dtype=np.int32)
             return GenerationBatchResult(next_token_ids=next_token_ids.tolist())
         else:
             # We must convert to list *before* slicing,
             # or JAX would perform a second copy for the sliced array
-            real_sequences = sum(batch.seq_lens > 0)
-            jax_ids = self._run_forward_batch_generation(cache, batch)
-            return GenerationBatchResult(next_token_ids=jax_ids.tolist()[:real_sequences])
+            jax_ids = self._run_forward_batch_generation(cache, forward_batch, sampling_metadata)
+            return GenerationBatchResult(next_token_ids=jax_ids.tolist()[:true_batch_len])
 
     def _run_forward_batch_generation(
-        self, cache: MHATokenToKVPool, batch: ModelWorkerBatch
+        self,
+        cache: MHATokenToKVPool,
+        forward_batch: ForwardBatch,
+        sampling_metadata: SamplingMetadata,
     ) -> jax.Array:
-        forward_batch, sampling_metadata = construct_forward_and_sampling_info(batch, self)
-
         # JIT boundary; model_fn is jit compiled
         # Returns the logits for the last token of each sequence
         cache.kv_buffer, last_logits = self.model_fn(cache.kv_buffer, forward_batch)
@@ -144,16 +148,15 @@ class ModelRunner:
     def _forward_thread_func(self):
         while True:
             # Blocks until we have a batch to run
-            (cache, batch) = self.input_queue.get()
+            (cache, batch, sampling, true_batch_len) = self.input_queue.get()
             batch.input_ids = resolve_future_token_ids(batch.input_ids, self.future_token_ids_map)
 
-            next_token_ids = self._run_forward_batch_generation(cache, batch)
+            next_token_ids = self._run_forward_batch_generation(cache, batch, sampling)
 
             self.future_token_ids_map = set_future_token_ids(
                 next_token_ids, self.future_token_ids_map
             )
-            num_real_sequences = sum(batch.seq_lens > 0)
-            self.output_queue.put((next_token_ids, num_real_sequences))
+            self.output_queue.put((next_token_ids, true_batch_len))
 
     def get_max_kv_tokens(
         self,
@@ -237,7 +240,11 @@ class ModelRunner:
                 forward_mode=ForwardMode.PREFILL,
                 req_to_token=req_to_token,
             )
-            self._run_forward_batch_generation(cache=cache, batch=synthetic_batch)
+            forward_batch, sampling_metadata = construct_forward_and_sampling_info(
+                synthetic_batch,
+                self,
+            )
+            self._run_forward_batch_generation(cache, forward_batch, sampling_metadata)
 
     def _precompile_decode(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         for num_tokens, num_reqs in self._decode_paddings:
@@ -248,4 +255,8 @@ class ModelRunner:
                 forward_mode=ForwardMode.DECODE,
                 req_to_token=req_to_token,
             )
-            self._run_forward_batch_generation(cache=cache, batch=synthetic_batch)
+            forward_batch, sampling_metadata = construct_forward_and_sampling_info(
+                synthetic_batch,
+                self,
+            )
+            self._run_forward_batch_generation(cache, forward_batch, sampling_metadata)
