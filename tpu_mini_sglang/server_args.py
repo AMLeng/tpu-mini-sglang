@@ -54,12 +54,6 @@ class ServerArgs:
         return f"http://{self.host}:{self.port}"
 
     def __post_init__(self):
-        # Round max up/min down to the nearest power of 2
-        # We force powers of 2 since this is used to determine jax padding shapes
-        self.max_num_batched_tokens = 1 << (self.max_num_batched_tokens - 1).bit_length()
-        self.max_num_batched_requests = 1 << (self.max_num_batched_requests - 1).bit_length()
-        self.min_num_batched_tokens = 1 << self.min_num_batched_tokens.bit_length() - 1
-        self.min_num_batched_requests = 1 << self.min_num_batched_requests.bit_length() - 1
         self.min_num_batched_tokens = min(self.min_num_batched_tokens, self.max_num_batched_tokens)
         self.min_num_batched_requests = min(
             self.min_num_batched_requests, self.max_num_batched_requests

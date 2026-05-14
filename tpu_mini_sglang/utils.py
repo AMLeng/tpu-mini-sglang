@@ -92,13 +92,16 @@ def approximate_model_size(model_config: ModelConfig, dtype_size: int):
     return dtype_size * (mlp_params + attention_params + embedding_params)
 
 
-def get_paddings(min_padding: int, max_padding: int):
-    # Generates all powers of two between min and max, inclusive
-    return [
-        1 << i
-        for i in range(0, max_padding.bit_length() + 1)
-        if min_padding <= (1 << i) <= max_padding
-    ]
+def get_paddings(min_padding: int, max_padding: int) -> list[int]:
+    assert min_padding < max_padding
+    # In addition to min and max themselves, generates all
+    # powers of two between min and max
+    padding_set = {
+        1 << i for i in range(max_padding.bit_length()) if min_padding <= (1 << i) <= max_padding
+    }
+    padding_set.add(min_padding)
+    padding_set.add(max_padding)
+    return sorted(padding_set)
 
 
 def configure_logger(server_args: ServerArgs, prefix: str = ""):
