@@ -31,9 +31,9 @@
 #       git clone https://github.com/AMLeng/tpu-mini-sglang.git ~/tpu-mini-sglang
 #       cd ~/tpu-mini-sglang && uv sync --extra tpu
 #
-# 6. vLLM venv with `vllm-tpu==0.19.0` (uses Python 3.12):
+# 6. vLLM venv with `vllm-tpu==0.13.3` (uses Python 3.12):
 #       cd ~ && uv venv --python 3.12
-#       cd ~ && uv pip install vllm-tpu==0.19.0
+#       cd ~ && uv pip install vllm-tpu==0.13.3
 #    The script calls ~/.venv/bin/vllm directly, so no activation needed.
 #
 # 7. Place this script at ~/benchmark_results/run_bench.sh and chmod +x.
@@ -41,7 +41,7 @@
 #
 # Sanity checks before the first run:
 #       ~/.venv/bin/python -c 'import vllm; print(vllm.__version__)'
-#         # → 0.19.0
+#         # → 0.13.3
 #       cd ~/tpu-mini-sglang && uv run python -c 'import jax; print(jax.devices())'
 #         # → list of 4 TPU devices
 #       ls -lh ~/ShareGPT_V3_unfiltered_cleaned_split.json
@@ -97,8 +97,8 @@ OUT_DIR="$HOME/benchmark_results"
 LOG_DIR_DEFAULT="$OUT_DIR/logs"
 DEFAULT_OUT="$OUT_DIR/$(date +%Y-%m-%d)-tpu-bench.md"
 
-INITIAL_WAIT_SEC=180
-POLL_INTERVAL_SEC=15
+INITIAL_WAIT_SEC=60
+POLL_INTERVAL_SEC=10
 READY_TIMEOUT_SEC=$((25 * 60))
 WARMUP_PROBE_TIMEOUT_SEC=300
 KILL_GRACE_SEC=30
@@ -139,27 +139,28 @@ SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 mkdir -p "$(dirname "$OUT_PATH")" "$LOG_DIR"
 
 # ---------- matrix ----------
-# Format: id|workload|in_len|out_len|conc_or_rate|num_prompts|mode
+# Format: id|workload|in_len|out_len|page_size|conc_or_rate|num_prompts|mode
+# page_sizes chosen to match vllm's derived page sizes
 CONFIGS=(
-  "01-decode-c1|decode|8|1024|1|32|closed-loop"
-  "02-decode-c16|decode|8|1024|16|64|closed-loop"
-  "03-decode-c64|decode|8|1024|64|256|closed-loop"
-  "04-decode-c256|decode|8|1024|256|1024|closed-loop"
-  "05-prefill-c1|prefill|4096|8|1|1000|closed-loop"
-  "06-prefill-c16|prefill|4096|8|16|1000|closed-loop"
-  "07-prefill-c64|prefill|4096|8|64|1024|closed-loop"
-  "08-balanced-c1|balanced|512|512|1|64|closed-loop"
-  "09-balanced-c16|balanced|512|512|16|64|closed-loop"
-  "10-balanced-c64|balanced|512|512|64|256|closed-loop"
-  "11-balanced-c256|balanced|512|512|256|1024|closed-loop"
-  "12-longctx-c1|longctx|32768|512|1|16|closed-loop"
-  "13-longctx-c8|longctx|32768|512|8|16|closed-loop"
-  "14-longctx-c32|longctx|32768|512|32|64|closed-loop"
-  "15-sharegpt-r1|sharegpt|0|0|1|200|open-loop"
-  "16-sharegpt-r2|sharegpt|0|0|2|200|open-loop"
-  "17-sharegpt-r4|sharegpt|0|0|4|200|open-loop"
-  "18-sharegpt-r8|sharegpt|0|0|8|200|open-loop"
-  "19-sharegpt-r16|sharegpt|0|0|16|200|open-loop"
+  "01-decode-c1|decode|8|1024|128|1|32|closed-loop"
+  "02-decode-c16|decode|8|1024|128|16|64|closed-loop"
+  "03-decode-c64|decode|8|1024|128|64|256|closed-loop"
+  "04-decode-c256|decode|8|1024|128|256|1024|closed-loop"
+  "05-prefill-c1|prefill|4096|8|256|1|1000|closed-loop"
+  "06-prefill-c16|prefill|4096|8|256|16|1000|closed-loop"
+  "07-prefill-c64|prefill|4096|8|256|64|1024|closed-loop"
+  "08-balanced-c1|balanced|512|512|128|1|64|closed-loop"
+  "09-balanced-c16|balanced|512|512|128|16|64|closed-loop"
+  "10-balanced-c64|balanced|512|512|128|64|256|closed-loop"
+  "11-balanced-c256|balanced|512|512|128|256|1024|closed-loop"
+  "12-longctx-c1|longctx|32768|512|128|1|16|closed-loop"
+  "13-longctx-c8|longctx|32768|512|128|8|16|closed-loop"
+  "14-longctx-c32|longctx|32768|512|128|32|64|closed-loop"
+  "15-sharegpt-r1|sharegpt|0|0|256|1|200|open-loop"
+  "16-sharegpt-r2|sharegpt|0|0|256|2|200|open-loop"
+  "17-sharegpt-r4|sharegpt|0|0|256|4|200|open-loop"
+  "18-sharegpt-r8|sharegpt|0|0|256|8|200|open-loop"
+  "19-sharegpt-r16|sharegpt|0|0|256|16|200|open-loop"
 )
 
 # ---------- helpers ----------
@@ -196,7 +197,7 @@ display_path() {
 }
 
 build_mini_sglang_cmd() {
-  local model="$1" max_ctx="$2" max_btokens="$3" max_breqs="$4"
+  local model="$1" max_ctx="$2" max_btokens="$3" max_breqs="$4" page_size="$5"
   local mini_dir; mini_dir=$(display_path "$TPU_MINI_DIR")
   cat <<EOF
 cd $mini_dir && uv run python -m tpu_mini_sglang.launch_server \\
@@ -205,6 +206,7 @@ cd $mini_dir && uv run python -m tpu_mini_sglang.launch_server \\
   --tp $TP \\
   --max-context-len $max_ctx \\
   --max-num-batched-tokens $max_btokens \\
+  --page-size $page_size \\
   --max-num-batched-requests $max_breqs
 EOF
 }
@@ -417,7 +419,7 @@ write_preamble() {
 - **Host:** $(hostname)
 - **Model:** \`$MODEL\`
 - **TP:** $TP, **Port:** $PORT
-- **vllm:** \`$vllm_ver\` (installed as \`vllm-tpu==0.19.0\`)
+- **vllm:** \`$vllm_ver\` (installed as \`vllm-tpu==0.13.3\`)
 
 ## Replication
 
@@ -426,9 +428,9 @@ This document was produced by \`$script_disp\`. To reproduce:
 ### 1. Environment
 
 - \`tpu-mini-sglang\` checkout at \`$mini_dir\` with its uv-managed venv at \`$mini_dir/.venv\` (set up with \`uv sync\` inside that directory).
-- vLLM venv at \`$vllm_venv\`, set up with Python 3.12 and \`vllm-tpu==0.19.0\`:
+- vLLM venv at \`$vllm_venv\`, set up with Python 3.12 and \`vllm-tpu==0.13.3\`:
   \`\`\`bash
-  cd ~ && uv venv --python 3.12 && uv pip install vllm-tpu==0.19.0
+  cd ~ && uv venv --python 3.12 && uv pip install vllm-tpu==0.13.3
   \`\`\`
   After that, \`$vllm_bin\` is the entry point used here for both \`vllm serve\` and \`vllm bench serve\`.
 - ShareGPT V3 unfiltered dataset at \`$sharegpt\`.
@@ -615,7 +617,7 @@ run_one_engine() {
 
 run_one_config() {
   local out="$1" row="$2"
-  IFS='|' read -r id workload in_len out_len cor np mode <<<"$row"
+  IFS='|' read -r id workload in_len out_len page_size cor np mode <<<"$row"
   local max_ctx max_seqs
   max_ctx=$(size_max_context "$workload" "$in_len" "$out_len")
   max_seqs=$(size_max_seqs "$cor")
@@ -623,7 +625,7 @@ run_one_config() {
   local mini_cmd vllm_cmd bench_cmd
   # Match vllm's V5E vllm serve default (OPENAI_API_SERVER usage context = 512)
   # so mini-sglang and vllm both run with the same prefill budget
-  mini_cmd=$(build_mini_sglang_cmd "$MODEL" "$max_ctx" "$VLLM_V5E_MAX_BATCH_TOKENS" "$max_seqs")
+  mini_cmd=$(build_mini_sglang_cmd "$MODEL" "$max_ctx" "$VLLM_V5E_MAX_BATCH_TOKENS" "$max_seqs" "$page_size")
   vllm_cmd=$(build_vllm_cmd "$MODEL" "$max_ctx" "$max_seqs")
   bench_cmd=$(build_bench_cmd "$workload" "$in_len" "$out_len" "$cor" "$np" "$MODEL")
 
