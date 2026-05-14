@@ -99,9 +99,12 @@ async def openai_v1_chat_completions(req: ChatCompletionRequest, raw_request: Re
                 media_type="application/json",
             )
 
+    include_usage = req.stream_options.include_usage if req.stream_options is not None else None
     return StreamingResponse(
         oai_format_response_stream(
-            app.state.tokenizer_manager.generate_request_stream(internal_request), req.model
+            app.state.tokenizer_manager.generate_request_stream(internal_request),
+            req.model,
+            include_usage=include_usage,
         ),
         media_type="text/event-stream",
     )

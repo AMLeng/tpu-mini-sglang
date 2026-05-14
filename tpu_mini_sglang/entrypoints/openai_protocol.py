@@ -42,6 +42,10 @@ class CompletionUsage(BaseModel):
     total_tokens: int
 
 
+class ChatCompletionStreamOptions(BaseModel):
+    include_usage: bool | None = None
+
+
 class ChatCompletionRequest(BaseModel):
     # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
     # We only include fields that are actually used downstream
@@ -52,6 +56,7 @@ class ChatCompletionRequest(BaseModel):
     max_completion_tokens: int | None = None
     presence_penalty: float = 0.0
     stream: bool = False
+    stream_options: ChatCompletionStreamOptions | None = None
     temperature: float = 0.7
     top_p: float = 1.0
     top_k: int = -1
@@ -105,7 +110,7 @@ class ChatCompletionChunk(BaseModel):
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     # service_tier: None
     # system_fingerprint: None
-    # usage: None
+    usage: CompletionUsage | None = None
 
 
 class ModelCard(BaseModel):
@@ -209,7 +214,7 @@ def oai_format_response(response: ResponseDict, model_name: str) -> ChatCompleti
 
 
 async def oai_format_response_stream(
-    response_stream: AsyncIterator[ResponseDict], model_name: str
+    response_stream: AsyncIterator[ResponseDict], model_name: str, include_usage: bool | None
 ) -> AsyncIterator[str]:
     is_first = True
     finish_reason_type = None
@@ -247,7 +252,7 @@ async def oai_format_response_stream(
                     id=rid, created=int(time.time()), choices=[choice], model=model_name
                 )
                 yield f"data: {chunk.model_dump_json()}\n\n"
-        # Emit final chunk, using the id from the last round of the loop
+        # Emit final chunks, using the info from the last round of the loop
         finish_reason_chunk = ChatCompletionChunk(
             id=rid,
             created=int(time.time()),
@@ -259,6 +264,21 @@ async def oai_format_response_stream(
             model=model_name,
         )
         yield f"data: {finish_reason_chunk.model_dump_json()}\n\n"
+        if include_usage:
+            completion_tokens = content["meta_info"]["completion_tokens"]
+            prompt_tokens = content["meta_info"]["prompt_tokens"]
+            usage_chunk = ChatCompletionChunk(
+                id=rid,
+                created=int(time.time()),
+                choices=[],
+                model=model_name,
+                usage=CompletionUsage(
+                    completion_tokens=completion_tokens,
+                    prompt_tokens=prompt_tokens,
+                    total_tokens=completion_tokens + prompt_tokens,
+                ),
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
     except ValueError as e:
         error_response = ErrorResponse(
             error=Error(
