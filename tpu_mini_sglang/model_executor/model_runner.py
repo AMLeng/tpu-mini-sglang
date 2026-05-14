@@ -35,6 +35,22 @@ from tpu_mini_sglang.utils import (
 logger = logging.getLogger(__name__)
 
 
+def _log_mem_available(end_str: str = ""):
+    devices = jax.devices()
+    platform = devices[0].platform
+    if platform != "tpu":
+        return
+    memory_per_device = [
+        mem_stats["bytes_limit"] - mem_stats["bytes_in_use"]
+        for device in devices
+        for mem_stats in [device.memory_stats()]
+    ]
+    memory_per_device = [m // (1024 * 1024) for m in memory_per_device]
+    if end_str != "":
+        end_str = " " + end_str
+    logger.info("Memory per device (MiB): %s%s", memory_per_device, end_str)
+
+
 class ModelRunner:
     def __init__(
         self,
@@ -150,6 +166,7 @@ class ModelRunner:
         devices = jax.devices()
         platform = devices[0].platform
         if platform == "tpu":
+            _log_mem_available("when determining KV cache size")
             memory_per_device = [
                 mem_stats["bytes_limit"] - mem_stats["bytes_in_use"]
                 for device in devices
@@ -215,6 +232,7 @@ class ModelRunner:
 
     def _precompile_prefill(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         for num_tokens, num_reqs in self._prefill_paddings:
+            _log_mem_available(f"at beginning of precompile for ({num_tokens},{num_reqs})")
             synthetic_batch = ModelWorkerBatch.generate_synthetic(
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
@@ -225,6 +243,7 @@ class ModelRunner:
 
     def _precompile_decode(self, cache: MHATokenToKVPool, req_to_token: np.ndarray) -> None:
         for num_tokens, num_reqs in self._decode_paddings:
+            _log_mem_available(f"at beginning of precompile for ({num_tokens},{num_reqs})")
             synthetic_batch = ModelWorkerBatch.generate_synthetic(
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
