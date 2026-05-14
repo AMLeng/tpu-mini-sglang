@@ -123,14 +123,12 @@ class ModelRunner:
         forward_batch, sampling_metadata = construct_forward_and_sampling_info(batch, self)
 
         # JIT boundary; model_fn is jit compiled
-        cache.kv_buffer, full_logits = self.model_fn(cache.kv_buffer, forward_batch)
-
-        last_token_loc = jnp.cumsum(forward_batch.extend_lens) - 1
-        logits = full_logits[last_token_loc]  # Now has shape (padded_batch_len, vocab)
+        # Returns the logits for the last token of each sequence
+        cache.kv_buffer, last_logits = self.model_fn(cache.kv_buffer, forward_batch)
 
         # Unlike the model, the sampler is stateful (nnx.Rngs) so we need to update the state
         self.sampler_state, next_token_ids = self.sampler_fn(
-            self.sampler_state, logits, sampling_metadata
+            self.sampler_state, last_logits, sampling_metadata
         )
 
         # We use take :len(reqs) to only get the ids for real (non padding) sequences

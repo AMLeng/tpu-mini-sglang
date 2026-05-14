@@ -182,6 +182,11 @@ class LlamaForCausalLM(ModelBase):
 
     def __call__(self, kv_caches: list[jax.Array], forward_batch: ForwardBatch):
         kv_caches, hidden_states = self.model(kv_caches, forward_batch)
+
+        last_token_loc = jnp.cumsum(forward_batch.extend_lens) - 1
+        # Now has shape (padded_batch_len, hidden_size)
+        hidden_states = hidden_states[last_token_loc]
+
         if self.config.tie_word_embeddings:
             return kv_caches, self.model.embed_tokens.attend(hidden_states)
         else:
