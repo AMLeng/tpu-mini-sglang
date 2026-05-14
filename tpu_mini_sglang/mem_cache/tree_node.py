@@ -6,10 +6,10 @@ import numpy as np
 
 @dataclass(eq=False)
 class TreeNode:
-    key: list[int]
+    key: np.ndarray
     value: np.ndarray  # len(value) == len(key)
     parent: Self | None
-    children: dict[tuple[int, ...], Self]
+    children: dict[bytes, Self]
     lock_count: int
     last_access_time: float
 

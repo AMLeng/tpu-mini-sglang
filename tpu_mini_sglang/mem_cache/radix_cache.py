@@ -20,8 +20,8 @@ class RadixCache:
     ):
         self.page_size = page_size
         self.root = TreeNode(
-            key=[],
-            value=np.array([], dtype=int),
+            key=np.array([], dtype=np.int32),
+            value=np.array([], dtype=np.int32),
             parent=None,
             children={},
             lock_count=1,  #  Root should never be evicted
@@ -35,20 +35,22 @@ class RadixCache:
         #  Total value length of all nodes with lock_count == 0, maintained for efficiency
         self._evictable_size: int = 0
 
-    def shared_prefix_len(self, first: list[int], second: list[int]) -> int:
-        # Computes page-aligned shared prefix length for the two lists
+    def shared_prefix_len(self, first: np.ndarray, second: np.ndarray) -> int:
+        # Computes page-aligned shared prefix length for the two arrays
         shared = 0
         max_page_start = min(len(first), len(second)) - self.page_size
         while shared <= max_page_start:
-            if any(first[shared + i] != second[shared + i] for i in range(self.page_size)):
-                break
+            if (
+                first[shared : shared + self.page_size] != second[shared : shared + self.page_size]
+            ).any():
+                return shared
             shared += self.page_size
         return shared
 
-    def _get_child_key(self, token_ids: list[int]):
-        # The children dict maps from a tuple of first page of ids to nodes
+    def _get_child_key(self, token_ids: np.ndarray) -> bytes:
+        # The children dict maps from the first page of ids to nodes
         # so we use this helper method to easily get the key
-        return tuple(token_ids[: self.page_size])
+        return token_ids[: self.page_size].tobytes()
 
     def _split_node(self, node: TreeNode, split_len: int):
         # Splits node in the tree so that the new intermediate node holds key[:split_len]
@@ -73,7 +75,7 @@ class RadixCache:
     def match_prefix(self, token_ids: list[int]) -> tuple[np.ndarray, TreeNode]:
         values = []
         current_node = self.root
-        current_tail = token_ids
+        current_tail = np.asarray(token_ids, dtype=np.int32)
         access_time = time.monotonic()
         current_node.last_access_time = access_time
         while (key := self._get_child_key(current_tail)) in current_node.children:
@@ -88,7 +90,7 @@ class RadixCache:
             current_tail = current_tail[prefix_len:]
             values.append(current_node.value)
 
-        value = np.concatenate(values) if len(values) > 0 else np.array([], dtype=int)
+        value = np.concatenate(values) if len(values) > 0 else np.array([], dtype=np.int32)
         return value, current_node
 
     def inc_lock_count(self, node: TreeNode) -> int:  # Returns delta in evictable size
@@ -130,7 +132,7 @@ class RadixCache:
         tree_values, current_node = self.match_prefix(token_ids)
 
         rematched_prefix_len = len(tree_values)
-        new_ids = token_ids[rematched_prefix_len:]
+        new_ids = np.asarray(token_ids[rematched_prefix_len:], dtype=np.int32)
         new_values = value[rematched_prefix_len:]
 
         # Add remaining tail to the tree as a new node
