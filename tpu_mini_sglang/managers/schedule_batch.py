@@ -158,3 +158,11 @@ class ScheduleBatch:
         # Safe since both batches are prepared/have kv cache slots allocated on construction
         self.out_cache_loc = np.concatenate([self.out_cache_loc, other.out_cache_loc])
         self.forward_mode = ForwardMode.merge(self.forward_mode, other.forward_mode)
+
+    def filter_finished(self) -> None:
+        # Filter out any finished requests; used in overlap scheduling to avoid running requests
+        # after their req pool slots have been freed
+        assert self.forward_mode == ForwardMode.DECODE
+        mask = np.asarray([r.finished_reason is None for r in self.reqs], dtype=bool)
+        self.reqs = [r for r in self.reqs if r.finished_reason is None]
+        self.out_cache_loc = self.out_cache_loc[mask]

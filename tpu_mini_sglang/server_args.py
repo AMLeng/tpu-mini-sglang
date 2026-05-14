@@ -33,6 +33,8 @@ class ServerArgs:
     max_context_len: int | None = None
     max_num_batched_tokens: int = 8192
     max_num_batched_requests: int = 256
+    min_num_batched_tokens: int = 64
+    min_num_batched_requests: int = 4
     enable_overlap: bool = True
     skip_scheduler_warmup: bool = False  # If set, skip JIT precompilation/Scheduler warmup
 
@@ -50,6 +52,18 @@ class ServerArgs:
     def url(self):
         # Assumes we are using IPv4
         return f"http://{self.host}:{self.port}"
+
+    def __post_init__(self):
+        # Round max up/min down to the nearest power of 2
+        # We force powers of 2 since this is used to determine jax padding shapes
+        self.max_num_batched_tokens = 1 << (self.max_num_batched_tokens - 1).bit_length()
+        self.max_num_batched_requests = 1 << (self.max_num_batched_requests - 1).bit_length()
+        self.min_num_batched_tokens = 1 << self.min_num_batched_tokens.bit_length() - 1
+        self.min_num_batched_requests = 1 << self.min_num_batched_requests.bit_length() - 1
+        self.min_num_batched_tokens = min(self.min_num_batched_tokens, self.max_num_batched_tokens)
+        self.min_num_batched_requests = min(
+            self.min_num_batched_requests, self.max_num_batched_requests
+        )
 
 
 @dataclasses.dataclass

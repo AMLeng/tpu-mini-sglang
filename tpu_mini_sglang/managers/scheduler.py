@@ -79,6 +79,7 @@ class Scheduler:
         # Init KV Cache
         self._init_memory_pool_and_cache(
             max_kv_tokens=self.model_runner.get_max_kv_tokens(self.model_config.dtype),
+            max_num_requests=self.server_args.max_num_batched_requests,
             page_size=self.server_args.page_size,
             kv_cache_dtype=self.model_config.dtype,
         )
@@ -276,6 +277,12 @@ class Scheduler:
             for req in finished_reqs:
                 self.tree_cache.cache_finished_req(req)
                 req_pool_indices.append(req.req_pool_idx)
+            if self.enable_overlap and self.running_decode_batch is not None:
+                # Remove finished reqs from the running decode before freeing req pool indices
+                # So that the running decode batch never has requests with freed req pool slots
+                self.running_decode_batch.filter_finished()
+                if len(self.running_decode_batch.reqs) == 0:
+                    self.running_decode_batch = None
             self.req_to_token_pool.free(req_pool_indices)  # Must happen after we cache reqs
             for req in unfinished_reqs:
                 self.tree_cache.cache_unfinished_req(req)
@@ -326,6 +333,7 @@ class Scheduler:
     def _init_memory_pool_and_cache(
         self,
         max_kv_tokens: int,
+        max_num_requests: int,
         page_size: int,
         kv_cache_dtype: np.dtype,
     ):
@@ -340,6 +348,15 @@ class Scheduler:
             ),
             4096,
         )
+        if max_num_requests < max_running_requests:
+            logger.warning(
+                "User specified maximum number of requests (%d)"
+                " is smaller than computed maximum (%d)."
+                " Adjusting downwards to user-specified number.",
+                max_num_requests,
+                max_running_requests,
+            )
+            max_running_requests = max_num_requests
 
         self.req_to_token_pool = ReqToTokenPool(
             max_running_requests=max_running_requests, max_context_len=self.model_config.context_len

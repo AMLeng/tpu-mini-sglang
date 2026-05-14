@@ -73,10 +73,12 @@ class ModelRunner:
             mesh=self.mesh,
         )
 
-        min_token_paddings = 64
-        min_batch_paddings = 4
-        _token_paddings = get_paddings(min_token_paddings, server_args.max_num_batched_tokens)
-        _req_paddings = get_paddings(min_batch_paddings, server_args.max_num_batched_requests)
+        _token_paddings = get_paddings(
+            server_args.min_num_batched_tokens, server_args.max_num_batched_tokens
+        )
+        _req_paddings = get_paddings(
+            server_args.min_num_batched_requests, server_args.max_num_batched_requests
+        )
 
         # Source of truth for what padding sizes to use for different ForwardModes
         # We use a single source of truth to avoid risk of JIT recompilation
