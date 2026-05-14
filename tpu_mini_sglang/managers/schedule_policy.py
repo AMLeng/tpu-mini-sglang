@@ -67,7 +67,9 @@ class PrefillAdder:
         _rem_tokens = min(
             self.rem_token_budget, self.rem_kv_tokens + self.tree_cache.evictable_size()
         )
-        full_extend_len = chunked_req.extend_len
+        full_extend_len = len(chunked_req.req_info.origin_input_ids) - len(
+            chunked_req.prefix_indices
+        )
         tokens_to_add = min(_rem_tokens, full_extend_len)
 
         truncated = tokens_to_add < full_extend_len
@@ -113,8 +115,8 @@ class PrefillAdder:
         tokens_to_add = min(self.rem_token_budget, extend_len)
 
         # If extend_len is larger, prefill won't finish so we will chunk the req
-        prefill_unfinished = tokens_to_add < extend_len
-        if prefill_unfinished:
+        is_chunked = tokens_to_add < extend_len
+        if is_chunked:
             # Non-final chunked prefills should always be page-aligned
             tokens_to_add = self._floor_paged_tokens(tokens_to_add)
 
@@ -124,14 +126,14 @@ class PrefillAdder:
             prefix_indices=kv_indices,
             last_node=last_node,
             tree_matched_len=len(kv_indices),
-            prefill_unfinished=prefill_unfinished,
+            is_chunked=int(is_chunked),
         )
 
         self.can_run_list.append(req)
         self.tree_cache.inc_lock_count(last_node)
         self._update_prefill_budget(
             tokens_to_add,
-            req_info.sampling_params.max_new_tokens if not prefill_unfinished else 0,
+            req_info.sampling_params.max_new_tokens if not is_chunked else 0,
         )
         return AddReqResult.CONTINUE
 

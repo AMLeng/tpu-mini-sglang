@@ -223,13 +223,16 @@ class Scheduler:
         not the current batch, so we will not know which requests finished in the current
         batch. We include them in the next batch and do an extra forward pass.
         """
+
         # Pull out and save the chunked req if present
-        chunked_reqs = [r for r in batch.reqs if r.prefill_unfinished]
+        chunked_reqs = [r for r in batch.reqs if r.is_chunked]
         assert len(chunked_reqs) + int(self.chunked_req is not None) <= 1
+
         if len(chunked_reqs) == 1:
             self.chunked_req = self.tree_cache.cache_chunked_req(chunked_reqs[0])
+            self.chunked_req.mark_chunked_partly_processed()
 
-        mask = [not r.prefill_unfinished and r.finished_reason is None for r in batch.reqs]
+        mask = [not r.is_chunked and r.finished_reason is None for r in batch.reqs]
         unfinished_reqs = [r for r, keep in zip(batch.reqs, mask, strict=True) if keep]
         if placeholder_ids is not None:
             placeholder_ids = [p for p, keep in zip(placeholder_ids, mask, strict=True) if keep]
@@ -255,18 +258,23 @@ class Scheduler:
         Processing after run_batch which requires knowing the actual output tokens.
         """
 
+        # Exclude reqs currently in chunked prefill, and stale finished requests;
+        # with overlap scheduling, finished requests will go through one more forward pass
+        # after they are finished---these requests should not participate in any more processing
+
+        # We pull out chunked reqs here since we are about to call mark_chunk_partly_processed
+        reqs = [r for r in batch.reqs if not r.is_chunked]
+
         # Process all reqs that have finished prefill
         for r, next_token_id in zip(batch.reqs, result.next_token_ids, strict=True):
-            if r.prefill_unfinished:
-                # If r is still in prefill, the generated token is nonsense and we ignore it
+            # If r is still in prefill, the generated token is nonsense and we ignore it
+            if r.is_chunked:
+                r.mark_chunked_partly_processed()
                 continue
             r.add_output_token(next_token_id, self.model_config.hf_eos_token_id)
 
-        # Exclude both reqs in chunked prefill, and stale finished requests;
-        # with overlap scheduling, finished requests will go through one more forward pass
-        # after they are finished---these requests should not participate in any more processing
-        reqs = [r for r in batch.reqs if not r.prefill_unfinished and not r.previously_finished]
-
+        # Now that we have added output tokens we check for if things were previously finished
+        reqs = [r for r in reqs if not r.previously_finished]
         self._stream_output(reqs)
 
         # Update caches

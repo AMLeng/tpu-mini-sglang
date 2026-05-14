@@ -68,7 +68,10 @@ class ReqState:
     _req_pool_idx: int | None = field(init=False, default=None)
 
     # Prefill-only info
-    prefill_unfinished: bool  # Prefill will not finish this round (for a chunked req)
+    # The number of times we have chunked this req; we use an int so that even during overlap
+    # scheduling, this can be tracked correctly
+    is_chunked: int
+    _chunked_processing_started: bool = field(init=False, default=False)
 
     # Output information
     output_ids: list[int] = field(default_factory=list)
@@ -91,17 +94,26 @@ class ReqState:
 
     def set_prefill_extend(self, extend_len: int, prefill_truncated: bool):
         self.extend_len = extend_len
-        self.prefill_unfinished = prefill_truncated
+        if prefill_truncated:
+            self.is_chunked += 1
+
+    def mark_chunked_partly_processed(self) -> None:
+        # We process all requests in two steps (finalize and process in the scheduler),
+        # which happen in different orders in overlap/non-overlap scheduling.
+        # We use this method and the chunked_processing_started bool to only decrement
+        # is_chunked when we are finished with both processing steps.
+        assert self.is_chunked > 0
+        if self._chunked_processing_started:
+            self.is_chunked -= 1
+        self._chunked_processing_started = not self._chunked_processing_started
 
     def update_cached_prefix(self, new_last_node: TreeNode, new_indices: np.ndarray, prefill: bool):
         self.last_node = new_last_node
         self.tree_matched_len = len(new_indices)
 
+        # We only need the prefix_indices during prefill
         if prefill:
             self.prefix_indices = new_indices
-            # extend_len and prefill_unfinished will be overwritten by the chunking logic later
-            # Right now we write both values as though we will fully finish prefill the next pass
-            self.set_prefill_extend(len(self.req_info.origin_input_ids) - len(new_indices), False)
 
     def prepare_prefill(self):
         self.kv_token_ids = self.req_info.origin_input_ids[
