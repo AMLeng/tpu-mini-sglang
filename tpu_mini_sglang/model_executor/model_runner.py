@@ -113,9 +113,11 @@ class ModelRunner:
             next_token_ids = -1 - np.arange(true_batch_len, dtype=np.int32)
             return GenerationBatchResult(next_token_ids=next_token_ids.tolist())
         else:
-            return GenerationBatchResult(
-                next_token_ids=self._run_forward_batch_generation(cache, batch).tolist()
-            )
+            # We must convert to list *before* slicing,
+            # or JAX would perform a second copy for the sliced array
+            real_sequences = sum(batch.seq_lens > 0)
+            jax_ids = self._run_forward_batch_generation(cache, batch)
+            return GenerationBatchResult(next_token_ids=jax_ids.tolist()[:real_sequences])
 
     def _run_forward_batch_generation(
         self, cache: MHATokenToKVPool, batch: ModelWorkerBatch
@@ -131,16 +133,13 @@ class ModelRunner:
             self.sampler_state, last_logits, sampling_metadata
         )
 
-        # We use take :len(reqs) to only get the ids for real (non padding) sequences
-        next_token_ids = next_token_ids[: sum(batch.seq_lens > 0)]
-
         next_token_ids.copy_to_host_async()
 
         return next_token_ids
 
     def resolve_last_result(self) -> GenerationBatchResult:
-        next_token_ids = self.output_queue.get()
-        return GenerationBatchResult(next_token_ids=next_token_ids.tolist())
+        next_token_ids, num_seqs = self.output_queue.get()
+        return GenerationBatchResult(next_token_ids=next_token_ids.tolist()[:num_seqs])
 
     def _forward_thread_func(self):
         while True:
@@ -153,7 +152,8 @@ class ModelRunner:
             self.future_token_ids_map = set_future_token_ids(
                 next_token_ids, self.future_token_ids_map
             )
-            self.output_queue.put(next_token_ids)
+            num_real_sequences = sum(batch.seq_lens > 0)
+            self.output_queue.put((next_token_ids, num_real_sequences))
 
     def get_max_kv_tokens(
         self,
