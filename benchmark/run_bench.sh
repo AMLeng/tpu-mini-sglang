@@ -475,15 +475,15 @@ For every row in the matrix the script:
 
 ## Matrix Summary
 
-| ID | Workload | in/out | C or rate | Mode | num-prompts |
-|---|---|---|---|---|---|
+| ID | Workload | in/out | page_size | C or rate | Mode | num-prompts |
+|---|---|---|---|---|---|---|
 EOF
   for row in "${CONFIGS[@]}"; do
-    IFS='|' read -r id workload in_len out_len cor np mode <<<"$row"
+    IFS='|' read -r id workload in_len out_len page_size cor np mode <<<"$row"
     local io cc
     if [ "$workload" = "sharegpt" ]; then io="(dataset)"; else io="$in_len/$out_len"; fi
-    if [ "$mode" = "open-loop" ]; then cc="${cor} req/s"; else cc="C=${cor}"; fi
-    printf '| %s | %s | %s | %s | %s | %s |\n' "$id" "$workload" "$io" "$cc" "$mode" "$np" >> "$out"
+    if [ "$mode" = "open-loop" ]; then cc="rate=${cor} req/s"; else cc="C=${cor}"; fi
+    printf '| %s | %s | %s | %s | %s | %s | %s |\n' "$id" "$workload" "$io" "$page_size" "$cc" "$mode" "$np" >> "$out"
   done
 }
 
