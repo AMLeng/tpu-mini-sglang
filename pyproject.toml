@@ -41,6 +41,7 @@ dev = [
   "pre-commit>=4.0.0",
   "types-psutil",
   "types-requests",
+  "matplotlib==3.10.9", # Used for chart generation
 ]
 
 
@@ -62,6 +63,9 @@ select = [
   "G", # flake8-logging-format
   "C4", # flake8-comprehensions
 ]
+[tool.ruff.lint.per-file-ignores]
+"**/plot_charts.py" = ["E501"]
+
 ignore = [
   "B007", # loop control variable not used within loop body; common in jax code
 ]
